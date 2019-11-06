@@ -29,11 +29,21 @@ use crate::ffi;
 use zeroize::Zeroize;
 
 /// Secret 256-bit key used as `x` in an ECDSA signature
-#[derive(Zeroize)]
-#[zeroize(drop)]
+//#[derive(Zeroize)]
+//#[zeroize(drop)]
+// Note, Zeroize on drop implemented manually. Zeroize crate didn't implement macros for
+// derive. Since derive(Zeroize) doesn;t work, we can do the same manually.
 pub struct SecretKey(pub [u8; constants::SECRET_KEY_SIZE]);
 impl_array_newtype!(SecretKey, u8, constants::SECRET_KEY_SIZE);
 impl_pretty_debug!(SecretKey);
+
+// If Zeroize will fix issue with the latest rust compiler, we can switch back
+// to derive
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 /// The number 1 encoded as a secret key
 /// Deprecated; `static` is not what I want; use `ONE_KEY` instead

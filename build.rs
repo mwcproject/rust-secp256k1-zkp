@@ -27,7 +27,6 @@ fn main() {
                .include("depend/secp256k1-zkp/include")
                .include("depend/secp256k1-zkp/src")
                .flag("-g")
-               .flag("-v")
                // TODO these three should be changed to use libgmp, at least until secp PR 290 is merged
                .define("USE_NUM_NONE", Some("1"))
                .define("USE_FIELD_INV_BUILTIN", Some("1"))

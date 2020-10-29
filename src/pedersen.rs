@@ -1551,6 +1551,82 @@ mod tests {
 	}
 
 	#[test]
+	fn test_bullet_proof_extra() {
+
+		let secp = Secp256k1::with_caps(ContextFlag::Commit);
+		let blinding = SecretKey::new(&secp, &mut thread_rng());
+
+		let rewind_nonce  = SecretKey::new(&secp, &mut thread_rng());
+		let private_nonce = rewind_nonce.clone();
+
+		let mut extra_data = [0u8; 32];
+		// simulate the extra commit with a random number. in reality, this should be a Hash to some output data excluding commit and proof data.
+		thread_rng().fill(&mut extra_data);
+
+		let value = 12345678;
+		let commit = secp.commit(value, blinding.clone()).unwrap();
+		let bullet_proof = secp.bullet_proof(value, blinding.clone(), rewind_nonce.clone(), private_nonce.clone(), Some(extra_data.to_vec()), None);
+
+		// correct verification
+		println!("Bullet proof len: {}", bullet_proof.plen);
+		let proof_range = secp
+			.verify_bullet_proof(commit, bullet_proof, Some(extra_data.to_vec()))
+			.unwrap();
+		assert_eq!(proof_range.min, 0);
+
+		// verify fails without correct extra commit data
+		let mut corrupted_extra_data = [0u8; 32];
+		corrupted_extra_data[0] = 1;
+		let res = secp.verify_bullet_proof(
+			commit,
+			bullet_proof,
+			Some(corrupted_extra_data.to_vec()),
+		);
+		assert!(res.is_err());
+
+		// Ensure rewinding works
+
+		// Rewind message with same nonce
+		let proof_info = secp
+			.rewind_bullet_proof(commit, rewind_nonce.clone(), Some(extra_data.to_vec()), bullet_proof)
+			.unwrap();
+		assert_eq!(proof_info.value, value);
+		assert_eq!(blinding, proof_info.blinding);
+
+		// rewinding with wrong nonce should puke
+		let proof_info = secp.rewind_bullet_proof(
+			commit,
+			blinding.clone(),
+			Some(extra_data.to_vec()),
+			bullet_proof,
+		);
+		assert!(proof_info.is_err());
+
+		// rewinding with wrong extra commit data should puke
+		let proof_info = secp.rewind_bullet_proof(commit, rewind_nonce.clone(), None, bullet_proof);
+		assert!(proof_info.is_err());
+
+		// including a message also works
+		let message_bytes: [u8; 20] = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+		let message = ProofMessage::from_bytes(&message_bytes);
+
+		let bullet_proof = secp.bullet_proof(
+			value,
+			blinding.clone(),
+			rewind_nonce.clone(),
+			private_nonce.clone(),
+			Some(extra_data.to_vec()),
+			Some(message.clone()),
+		);
+		// Rewind message with correct nonce
+		let proof_info = secp
+			.rewind_bullet_proof(commit, rewind_nonce, Some(extra_data.to_vec()), bullet_proof)
+			.unwrap();
+		assert_eq!(proof_info.value, value);
+		assert_eq!(proof_info.message, message);
+	}
+
+	#[test]
 	fn test_bullet_proof_multisig() {
 		let multisig_bp =
 			|v, nonce: SecretKey, ca, cb, ba, bb, msg, extra| -> (RangeProof, Result<ProofRange, Error>) {

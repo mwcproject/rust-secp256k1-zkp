@@ -29,21 +29,11 @@ use crate::ffi;
 use zeroize::Zeroize;
 
 /// Secret 256-bit key used as `x` in an ECDSA signature
-//#[derive(Zeroize)]
-//#[zeroize(drop)]
-// Note, Zeroize on drop implemented manually. Zeroize crate didn't implement macros for
-// derive. Since derive(Zeroize) doesn;t work, we can do the same manually.
+#[derive(Zeroize)]
+#[zeroize(drop)]
 pub struct SecretKey(pub [u8; constants::SECRET_KEY_SIZE]);
 impl_array_newtype!(SecretKey, u8, constants::SECRET_KEY_SIZE);
 impl_pretty_debug!(SecretKey);
-
-// If Zeroize will fix issue with the latest rust compiler, we can switch back
-// to derive
-impl Drop for SecretKey {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
 
 /// The number 1 encoded as a secret key
 /// Deprecated; `static` is not what I want; use `ONE_KEY` instead
@@ -305,7 +295,7 @@ impl Decodable for PublicKey {
             if len == constants::UNCOMPRESSED_PUBLIC_KEY_SIZE {
                 unsafe {
                     use std::mem;
-                    let mut ret: [u8; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE] = mem::uninitialized();
+                    let mut ret: [u8; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE] = mem::MaybeUninit::uninit().assume_init();
                     for i in 0..len {
                         ret[i] = d.read_seq_elt(i, |d| Decodable::decode(d))?;
                     }
@@ -314,7 +304,7 @@ impl Decodable for PublicKey {
             } else if len == constants::COMPRESSED_PUBLIC_KEY_SIZE {
                 unsafe {
                     use std::mem;
-                    let mut ret: [u8; constants::COMPRESSED_PUBLIC_KEY_SIZE] = mem::uninitialized();
+                    let mut ret: [u8; constants::COMPRESSED_PUBLIC_KEY_SIZE] = mem::MaybeUninit::uninit().assume_init();
                     for i in 0..len {
                         ret[i] = d.read_seq_elt(i, |d| Decodable::decode(d))?;
                     }
@@ -363,7 +353,7 @@ impl<'de> Deserialize<'de> for PublicKey {
                 let s = Secp256k1::with_caps(crate::ContextFlag::None);
                 unsafe {
                     use std::mem;
-                    let mut ret: [u8; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE] = mem::uninitialized();
+                    let mut ret: [u8; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE] = mem::MaybeUninit::uninit().assume_init();
 
                     let mut read_len = 0;
                     while read_len < constants::UNCOMPRESSED_PUBLIC_KEY_SIZE {

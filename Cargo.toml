@@ -1,12 +1,12 @@
 [package]
 
 name = "grin_secp256k1zkp"
-version = "0.7.7"
+version = "0.7.9"
 authors = [ "Grin Developers <mimblewimble@lists.launchpad.net>",
-						"Dawid Ciężarkiewicz <dpc@ucore.info>",
+            "Dawid Ciężarkiewicz <dpc@ucore.info>",
             "Andrew Poelstra <apoelstra@wpsoftware.net>" ]
 license = "CC0-1.0"
-homepage = "https://grin-tech.org"
+homepage = "https://grin.mw"
 repository = "https://github.com/mimblewimble/rust-secp256k1/"
 description = "Grin's fork with Zero-Knowledge extensions of Rust bindings for Pieter Wuille's `libsecp256k1` library. Implements ECDSA for the SECG elliptic curve group secp256k1 and related utilities."
 keywords = [ "crypto", "secp256k1", "grin", "bitcoin", "zero-knowledge" ]
@@ -26,6 +26,7 @@ unstable = []
 default = []
 bullet-proof-sizing = []
 dev = ["clippy"]
+lowmemory = []
 
 [dependencies]
 arrayvec = "0.3"
@@ -35,7 +36,7 @@ libc = "0.2"
 rustc-serialize = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-zeroize = "0.10.1"
+zeroize = "0.9"
 
 [dev-dependencies]
 chrono = "0.4.5"

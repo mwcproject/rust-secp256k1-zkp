@@ -615,7 +615,7 @@ impl Secp256k1 {
     #[inline]
     pub fn generate_keypair<R: Rng>(&self, rng: &mut R)
                                    -> Result<(key::SecretKey, key::PublicKey), Error> {
-        let sk = key::SecretKey::new(self, rng);
+        let sk = key::SecretKey::new(rng);
         let pk = key::PublicKey::from_secret_key(self, &sk)?;
         Ok((sk, pk))
     }
@@ -760,9 +760,9 @@ mod tests {
         assert_eq!(full.recover(&msg, &sigr), Ok(pk));
 
         // Check that we can produce keys from slices with no precomputation
-        let (pk_slice, sk_slice) = (&pk.serialize_vec(&none, true), &sk[..]);
-        let new_pk = PublicKey::from_slice(&none, pk_slice).unwrap();
-        let new_sk = SecretKey::from_slice(&none, sk_slice).unwrap();
+        let (pk_slice, sk_slice) = (&pk.serialize_vec(true), &sk[..]);
+        let new_pk = PublicKey::from_slice(pk_slice).unwrap();
+        let new_sk = SecretKey::from_slice(sk_slice).unwrap();
         assert_eq!(sk, new_sk);
         assert_eq!(pk, new_pk);
     }
@@ -792,7 +792,7 @@ mod tests {
         let one = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
 
-        let sk = SecretKey::from_slice(&s, &one).unwrap();
+        let sk = SecretKey::from_slice(&one).unwrap();
         let msg = Message::from_slice(&one).unwrap();
 
         let sig = s.sign_recoverable(&msg, &sk).unwrap();
@@ -893,7 +893,7 @@ mod tests {
         wild_keys[1][0] -= 1;
         wild_msgs[1][0] -= 1;
 
-        for key in wild_keys.iter().map(|k| SecretKey::from_slice(&s, &k[..]).unwrap()) {
+        for key in wild_keys.iter().map(|k| SecretKey::from_slice(&k[..]).unwrap()) {
             for msg in wild_msgs.iter().map(|m| Message::from_slice(&m[..]).unwrap()) {
                 let sig = s.sign(&msg, &key).unwrap();
                 let pk = PublicKey::from_secret_key(&s, &key).unwrap();
@@ -1039,7 +1039,7 @@ mod tests {
 
         let secp = Secp256k1::new();
         let mut sig = Signature::from_der(&secp, &sig[..]).unwrap();
-        let pk = PublicKey::from_slice(&secp, &pk[..]).unwrap();
+        let pk = PublicKey::from_slice(&pk[..]).unwrap();
         let msg = Message::from_slice(&msg[..]).unwrap();
 
         // without normalization we expect this will fail

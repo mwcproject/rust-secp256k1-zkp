@@ -34,7 +34,7 @@ pub const ZERO_256: [u8; 32] = [
 /// msg: the message to sign
 /// seckey: the secret key
 pub fn export_secnonce_single(secp: &Secp256k1) -> Result<SecretKey, Error> {
-	let mut return_key = SecretKey::new(&secp, &mut thread_rng());
+	let mut return_key = SecretKey::new(&mut thread_rng());
 	let mut seed = [0u8; 32];
 	thread_rng().fill(&mut seed);
 	let retval = unsafe {

@@ -96,11 +96,11 @@ impl Commitment {
 	}
 
 	/// Creates from a pubkey
-	pub fn from_pubkey(secp: &Secp256k1, pk: &key::PublicKey) -> Result<Self, Error> {
+	pub fn from_pubkey(pk: &key::PublicKey) -> Result<Self, Error> {
 		unsafe {
 			let mut commit_i = [0; constants::PEDERSEN_COMMITMENT_SIZE_INTERNAL];
-			if ffi::secp256k1_pubkey_to_pedersen_commitment(secp.ctx, commit_i.as_mut_ptr(), &pk.0 as *const _) == 1 {
-				Ok(secp.commit_ser(commit_i)?)
+			if ffi::secp256k1_pubkey_to_pedersen_commitment(ffi::secp256k1_context_no_precomp, commit_i.as_mut_ptr(), &pk.0 as *const _) == 1 {
+				Ok(Secp256k1::commit_ser(commit_i)?)
 			} else {
 				Err(InvalidCommit)
 			}
@@ -108,11 +108,11 @@ impl Commitment {
 	}
 
 	/// Converts a commitment to a public key
-	pub fn to_pubkey(&self, secp: &Secp256k1) -> Result<key::PublicKey, Error> {
+	pub fn to_pubkey(&self) -> Result<key::PublicKey, Error> {
 		let mut pk = unsafe { ffi::PublicKey::blank() };
 		unsafe {
-			let commit = secp.commit_parse(self.0.clone())?;
-			if ffi::secp256k1_pedersen_commitment_to_pubkey(secp.ctx, &mut pk, commit.as_ptr()) == 1 {
+			let commit = Secp256k1::commit_parse(self.0.clone())?;
+			if ffi::secp256k1_pedersen_commitment_to_pubkey(ffi::secp256k1_context_no_precomp, &mut pk, commit.as_ptr()) == 1 {
 				Ok(key::PublicKey::from_secp256k1_pubkey(pk))
 			} else {
 				Err(InvalidPublicKey)
@@ -366,11 +366,7 @@ impl Secp256k1 {
 		sig: &Signature,
 		commit: &Commitment,
 	) -> Result<(), Error> {
-		if self.caps != ContextFlag::Commit {
-			return Err(Error::IncapableContext);
-		}
-
-		let pubkey = commit.to_pubkey(&self).unwrap();
+		let pubkey = commit.to_pubkey().unwrap();
 
 		let result = self.verify(msg, sig, &pubkey);
 		match result {
@@ -380,12 +376,12 @@ impl Secp256k1 {
 	}
 
 	/// Parse a commit into an internal representation
-	fn commit_parse(&self, c_in: [u8;constants::PEDERSEN_COMMITMENT_SIZE])
+	pub fn commit_parse(c_in: [u8;constants::PEDERSEN_COMMITMENT_SIZE])
 	-> Result<CommitmentInternal, Error> {
 		let c_out = unsafe {
 			let mut c_out = CommitmentInternal::blank();
 			ffi::secp256k1_pedersen_commitment_parse(
-				self.ctx,
+				ffi::secp256k1_context_no_precomp,
 				c_out.as_mut_ptr(),
 				c_in.as_ptr(),
 			);
@@ -395,12 +391,12 @@ impl Secp256k1 {
 	}
 
 	/// Parse a commit into an internal representation
-	fn commit_ser(&self, c_in: [u8;constants::PEDERSEN_COMMITMENT_SIZE_INTERNAL])
+	pub fn commit_ser(c_in: [u8;constants::PEDERSEN_COMMITMENT_SIZE_INTERNAL])
 	-> Result<Commitment, Error> {
 		let c_out = unsafe {
 			let mut c_out = Commitment::blank();
 			ffi:: secp256k1_pedersen_commitment_serialize(
-				self.ctx,
+				ffi::secp256k1_context_no_precomp,
 				c_out.as_mut_ptr(),
 				c_in.as_ptr(),
 			);
@@ -411,13 +407,10 @@ impl Secp256k1 {
 
 	/// Creates a pedersen commitment from a value and a blinding factor
 	pub fn commit(&self, value: u64, blind: SecretKey) -> Result<Commitment, Error> {
-		if self.caps != ContextFlag::Commit {
-			return Err(Error::IncapableContext);
-		}
 		let mut commit_i = [0; constants::PEDERSEN_COMMITMENT_SIZE_INTERNAL];
 		unsafe {
 			ffi::secp256k1_pedersen_commit(
-				self.ctx,
+				ffi::secp256k1_context_no_precomp,
 				commit_i.as_mut_ptr(),
 				blind.as_ptr(),
 				value,
@@ -425,18 +418,15 @@ impl Secp256k1 {
 				constants::GENERATOR_G.as_ptr(),
 			)
 		};
-		Ok(self.commit_ser(commit_i)?)
+		Ok(Secp256k1::commit_ser(commit_i)?)
 	}
 
 	/// Creates a pedersen commitment from a two blinding factors
 	pub fn commit_blind(&self, value: SecretKey, blind: SecretKey) -> Result<Commitment, Error> {
-		if self.caps != ContextFlag::Commit {
-			return Err(Error::IncapableContext);
-		}
 		let mut commit_i = [0; constants::PEDERSEN_COMMITMENT_SIZE_INTERNAL];
 		unsafe {
 			ffi::secp256k1_pedersen_blind_commit(
-				self.ctx,
+				ffi::secp256k1_context_no_precomp,
 				commit_i.as_mut_ptr(),
 				blind.as_ptr(),
 				value.as_ptr(),
@@ -444,21 +434,18 @@ impl Secp256k1 {
 				constants::GENERATOR_G.as_ptr(),
 			)
 		};
-		Ok(self.commit_ser(commit_i)?)
+		Ok(Secp256k1::commit_ser(commit_i)?)
 	}
 
 	/// Convenience method to Create a pedersen commitment only from a value,
 	/// with a zero blinding factor
 	pub fn commit_value(&self, value: u64) -> Result<Commitment, Error> {
-		if self.caps != ContextFlag::Commit {
-			return Err(Error::IncapableContext);
-		}
 		let mut commit_i = [0; constants::PEDERSEN_COMMITMENT_SIZE_INTERNAL];
 		let zblind = [0u8; 32];
 
 		unsafe {
 			ffi::secp256k1_pedersen_commit(
-				self.ctx,
+				ffi::secp256k1_context_no_precomp,
 				commit_i.as_mut_ptr(),
 				zblind.as_ptr(),
 				value,
@@ -466,19 +453,19 @@ impl Secp256k1 {
 				constants::GENERATOR_G.as_ptr(),
 			)
 		};
-		Ok(self.commit_ser(commit_i)?)
+		Ok(Secp256k1::commit_ser(commit_i)?)
 	}
 
 	/// Taking vectors of positive and negative commitments as well as an
 	/// expected excess, verifies that it all sums to zero.
 	pub fn verify_commit_sum(&self, positive: Vec<Commitment>, negative: Vec<Commitment>) -> bool {
-		let pos = map_vec!(positive, |p| { self.commit_parse(p.0).unwrap() });
-		let neg = map_vec!(negative, |n| self.commit_parse(n.0).unwrap());
+		let pos = map_vec!(positive, |p| { Secp256k1::commit_parse(p.0).unwrap() });
+		let neg = map_vec!(negative, |n| Secp256k1::commit_parse(n.0).unwrap());
 		let pos = map_vec!(pos, |p| p.0.as_ptr());
 		let neg = map_vec!(neg, |n| n.0.as_ptr());
 		unsafe {
 			ffi::secp256k1_pedersen_verify_tally(
-				self.ctx,
+				ffi::secp256k1_context_no_precomp,
 				pos.as_ptr(),
 				pos.len() as size_t,
 				neg.as_ptr(),
@@ -493,14 +480,14 @@ impl Secp256k1 {
 		positive: Vec<Commitment>,
 		negative: Vec<Commitment>,
 	) -> Result<Commitment, Error> {
-		let pos = map_vec!(positive, |p| self.commit_parse(p.0).unwrap());
-		let neg = map_vec!(negative, |n| self.commit_parse(n.0).unwrap());
+		let pos = map_vec!(positive, |p| Secp256k1::commit_parse(p.0).unwrap());
+		let neg = map_vec!(negative, |n| Secp256k1::commit_parse(n.0).unwrap());
 		let pos = map_vec!(pos, |p| p.0.as_ptr());
 		let neg = map_vec!(neg, |n| n.0.as_ptr());
 		let mut ret_i = unsafe { CommitmentInternal::blank() };
 		let err = unsafe {
 			ffi::secp256k1_pedersen_commit_sum(
-				self.ctx,
+				ffi::secp256k1_context_no_precomp,
 				ret_i.as_mut_ptr(),
 				pos.as_ptr(),
 				pos.len() as size_t,
@@ -509,7 +496,7 @@ impl Secp256k1 {
 			)
 		};
 		if err == 1 {
-			Ok(self.commit_ser(ret_i.0)?)
+			Ok(Secp256k1::commit_ser(ret_i.0)?)
 		} else {
 			Err(Error::IncorrectCommitSum)
 		}
@@ -528,7 +515,7 @@ impl Secp256k1 {
 		unsafe {
 			assert_eq!(
 				ffi::secp256k1_pedersen_blind_sum(
-					self.ctx,
+					ffi::secp256k1_context_no_precomp,
 					ret.as_mut_ptr(),
 					all.as_ptr(),
 					all.len() as size_t,
@@ -593,7 +580,7 @@ impl Secp256k1 {
 
 		let extra_commit = [0u8; 33];
 
-		let commit = self.commit_parse(commit.0).unwrap();
+		let commit = Secp256k1::commit_parse(commit.0).unwrap();
 
 		// TODO - confirm this reworked retry logic works as expected
 		// pretty sure the original approach retried on success (so twice in total)
@@ -645,7 +632,7 @@ impl Secp256k1 {
 
 		let extra_commit = [0u8; 33];
 
-		let commit = self.commit_parse(commit.0)?;
+		let commit = Secp256k1::commit_parse(commit.0)?;
 
 		let success = unsafe {
 			ffi::secp256k1_rangeproof_verify(
@@ -685,7 +672,7 @@ impl Secp256k1 {
 
 		let extra_commit = [0u8; 33];
 
-		let commit = self.commit_parse(commit.0).unwrap();
+		let commit = Secp256k1::commit_parse(commit.0).unwrap();
 
 		let success = unsafe {
 			ffi::secp256k1_rangeproof_rewind(
@@ -890,7 +877,7 @@ impl Secp256k1 {
 		let commit_vec;
 		let commit_ptr_vec;
 		let commit_ptr_vec_ptr = if commits.len() > 0 {
-			commit_vec = map_vec!(commits, |c| self.commit_parse(c.0).unwrap());
+			commit_vec = map_vec!(commits, |c| Secp256k1::commit_parse(c.0).unwrap());
 			commit_ptr_vec = map_vec!(commit_vec, |c| c.as_ptr());
 			commit_ptr_vec.as_ptr()
 		} else {
@@ -968,7 +955,7 @@ impl Secp256k1 {
 			None => (0, ptr::null()),
 		};
 
-		let commit = self.commit_parse(commit.0).unwrap();
+		let commit = Secp256k1::commit_parse(commit.0).unwrap();
 
 		let success = unsafe {
 			let scratch = ffi::secp256k1_scratch_space_create(self.ctx, SCRATCH_SPACE_SIZE);
@@ -1016,7 +1003,7 @@ impl Secp256k1 {
 			constants::SINGLE_BULLET_PROOF_SIZE
 		};
 
-		let commit_vec = map_vec!(commits, |c| self.commit_parse(c.0).unwrap());
+		let commit_vec = map_vec!(commits, |c| Secp256k1::commit_parse(c.0).unwrap());
 		let commit_vec = map_vec!(commit_vec, |c| c.as_ptr());
 		let proof_vec = map_vec!(proofs, |p| p.proof.as_ptr());
 		//		let min_values = vec![0; proofs.len()];
@@ -1099,7 +1086,7 @@ impl Secp256k1 {
 		let mut blind_out = [0u8; constants::SECRET_KEY_SIZE];
 		let mut value_out = 0;
 		let mut message_out = [0u8; 20];
-		let commit = self.commit_parse(commit.0)?;
+		let commit = Secp256k1::commit_parse(commit.0)?;
 
 		let success = unsafe {
 			let scratch = ffi::secp256k1_scratch_space_create(self.ctx, SCRATCH_SPACE_SIZE);
@@ -1163,14 +1150,13 @@ mod tests {
 			0xc6, 0x04, 0x7f, 0x94, 0x41, 0xed, 0x7d, 0x6d, 0x30, 0x45, 0x40, 0x6e, 0x95, 0xc0, 0x7c, 0xd8,
 			0x5c, 0x77, 0x8e, 0x4b, 0x8c, 0xef, 0x3c, 0xa7, 0xab, 0xac, 0x09, 0xb9, 0x5c, 0x70, 0x9e, 0xe5
 		];
-		let secp = Secp256k1::with_caps(ContextFlag::Commit);
-		let commit_i = secp.commit_parse(two_g).unwrap();
-		let comm = secp.commit_ser(commit_i.0).unwrap();
+		let commit_i = Secp256k1::commit_parse(two_g).unwrap();
+		let comm = Secp256k1::commit_ser(commit_i.0).unwrap();
 		assert_eq!(comm, Commitment(two_g));
 
 		let c5 = commit(5);
-		let commit_i = secp.commit_parse(c5.0).unwrap();
-		let comm = secp.commit_ser(commit_i.0).unwrap();
+		let commit_i = Secp256k1::commit_parse(c5.0).unwrap();
+		let comm = Secp256k1::commit_ser(commit_i.0).unwrap();
 		assert_eq!(comm, c5);
 
 	}
@@ -1278,7 +1264,7 @@ mod tests {
 		let secp = Secp256k1::with_caps(ContextFlag::Commit);
 		let blinding = SecretKey::new(&mut thread_rng());
 		let commit = secp.commit(5, blinding).unwrap();
-		let pubkey = commit.to_pubkey(&secp);
+		let pubkey = commit.to_pubkey();
 		match pubkey {
 			Ok(_) => {
 				// this is good
@@ -1295,7 +1281,7 @@ mod tests {
 			let secp = Secp256k1::with_caps(ContextFlag::Commit);
 			let blinding = SecretKey::new(&mut thread_rng());
 			let commit = secp.commit(1, blinding).unwrap();
-			let pubkey = commit.to_pubkey(&secp);
+			let pubkey = commit.to_pubkey();
 			let p = match pubkey {
 				Ok(p) => {
 					// this is good
@@ -1307,7 +1293,7 @@ mod tests {
 			};
 			//println!("Pre Commit is: {:?}", commit);
 			//println!("Pre Pubkey is: {:?}", p);
-			let new_commit = Commitment::from_pubkey(&secp, &p);
+			let new_commit = Commitment::from_pubkey(&p);
 			let commit2 = match new_commit {
 				Ok(c) => {
 					// this is good
@@ -1335,7 +1321,7 @@ mod tests {
 
 		let sig = secp.sign(&msg, &blinding).unwrap();
 
-		let pubkey = commit.to_pubkey(&secp).unwrap();
+		let pubkey = commit.to_pubkey().unwrap();
 
 		// check that we can successfully verify the signature with the public key
 		if let Ok(_) = secp.verify(&msg, &sig, &pubkey) {

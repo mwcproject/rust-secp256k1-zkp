@@ -458,7 +458,7 @@ impl Secp256k1 {
 
 	/// Taking vectors of positive and negative commitments as well as an
 	/// expected excess, verifies that it all sums to zero.
-	pub fn verify_commit_sum(&self, positive: Vec<Commitment>, negative: Vec<Commitment>) -> bool {
+	pub fn verify_commit_sum(positive: Vec<Commitment>, negative: Vec<Commitment>) -> bool {
 		let pos = map_vec!(positive, |p| { Secp256k1::commit_parse(p.0).unwrap() });
 		let neg = map_vec!(negative, |n| Secp256k1::commit_parse(n.0).unwrap());
 		let pos = map_vec!(pos, |p| p.0.as_ptr());
@@ -476,7 +476,6 @@ impl Secp256k1 {
 
 	/// Computes the sum of multiple positive and negative pedersen commitments.
 	pub fn commit_sum(
-		&self,
 		positive: Vec<Commitment>,
 		negative: Vec<Commitment>,
 	) -> Result<Commitment, Error> {
@@ -504,7 +503,6 @@ impl Secp256k1 {
 
 	/// Computes the sum of multiple positive and negative blinding factors.
 	pub fn blind_sum(
-		&self,
 		positive: Vec<SecretKey>,
 		negative: Vec<SecretKey>,
 	) -> Result<SecretKey, Error> {
@@ -1169,33 +1167,29 @@ mod tests {
 			secp.commit(value, blinding).unwrap()
 		}
 
-		let secp = Secp256k1::with_caps(ContextFlag::Commit);
+		assert!(Secp256k1::verify_commit_sum(vec![], vec![],));
 
-		assert!(secp.verify_commit_sum(vec![], vec![],));
+		assert!(Secp256k1::verify_commit_sum(vec![commit(5)], vec![commit(5)],));
 
-		assert!(secp.verify_commit_sum(vec![commit(5)], vec![commit(5)],));
+		assert!(Secp256k1::verify_commit_sum(vec![commit(3), commit(2)], vec![commit(5)]));
 
-		assert!(secp.verify_commit_sum(vec![commit(3), commit(2)], vec![commit(5)]));
-
-		assert!(secp.verify_commit_sum(vec![commit(2), commit(4)], vec![commit(1), commit(5)]));
+		assert!(Secp256k1::verify_commit_sum(vec![commit(2), commit(4)], vec![commit(1), commit(5)]));
 	}
 
 	#[test]
 	fn test_verify_commit_sum_one_keys() {
-		let secp = Secp256k1::with_caps(ContextFlag::Commit);
-
 		fn commit(value: u64, blinding: SecretKey) -> Commitment {
 			let secp = Secp256k1::with_caps(ContextFlag::Commit);
 			secp.commit(value, blinding).unwrap()
 		}
 
-		assert!(secp.verify_commit_sum(vec![commit(5, ONE_KEY)], vec![commit(5, ONE_KEY)]));
+		assert!(Secp256k1::verify_commit_sum(vec![commit(5, ONE_KEY)], vec![commit(5, ONE_KEY)]));
 
 		// we expect this not to verify
 		// even though the values add up to 0
 		// the keys themselves do not add to 0
 		assert_eq!(
-			secp.verify_commit_sum(
+			Secp256k1::verify_commit_sum(
 				vec![commit(3, ONE_KEY), commit(2, ONE_KEY)],
 				vec![commit(5, ONE_KEY)],
 			),
@@ -1204,8 +1198,8 @@ mod tests {
 
 		// to get these to verify we need to
 		// use the same "sum" of blinding factors on both sides
-		let two_key = secp.blind_sum(vec![ONE_KEY, ONE_KEY], vec![]).unwrap();
-		assert!(secp.verify_commit_sum(
+		let two_key = Secp256k1::blind_sum(vec![ONE_KEY, ONE_KEY], vec![]).unwrap();
+		assert!(Secp256k1::verify_commit_sum(
 			vec![commit(3, ONE_KEY), commit(2, ONE_KEY)],
 			vec![commit(5, two_key)],
 		));
@@ -1213,8 +1207,6 @@ mod tests {
 
 	#[test]
 	fn test_verify_commit_sum_random_keys() {
-		let secp = Secp256k1::with_caps(ContextFlag::Commit);
-
 		fn commit(value: u64, blinding: SecretKey) -> Commitment {
 			let secp = Secp256k1::with_caps(ContextFlag::Commit);
 			secp.commit(value, blinding).unwrap()
@@ -1224,9 +1216,9 @@ mod tests {
 		let blind_neg = SecretKey::new(&mut thread_rng());
 
 		// now construct blinding factor to net out appropriately
-		let blind_sum = secp.blind_sum(vec![blind_pos.clone()], vec![blind_neg.clone()]).unwrap();
+		let blind_sum = Secp256k1::blind_sum(vec![blind_pos.clone()], vec![blind_neg.clone()]).unwrap();
 
-		assert!(secp.verify_commit_sum(
+		assert!(Secp256k1::verify_commit_sum(
 			vec![commit(101, blind_pos)],
 			vec![commit(75, blind_neg), commit(26, blind_sum)],
 		));
@@ -1248,10 +1240,10 @@ mod tests {
 		let blind_neg = secp.blind_switch(neg_value, SecretKey::new(&mut thread_rng())).unwrap();
 
 		// now construct blinding factor to net out appropriately
-		let blind_sum = secp.blind_sum(vec![blind_pos.clone()], vec![blind_neg.clone()]).unwrap();
+		let blind_sum = Secp256k1::blind_sum(vec![blind_pos.clone()], vec![blind_neg.clone()]).unwrap();
 		let diff = pos_value - neg_value;
 
-		assert!(secp.verify_commit_sum(
+		assert!(Secp256k1::verify_commit_sum(
 			vec![commit(pos_value, blind_pos)],
 			vec![commit(neg_value, blind_neg), commit(diff, blind_sum)],
 		));
@@ -1333,8 +1325,6 @@ mod tests {
 
 	#[test]
 	fn test_commit_sum() {
-		let secp = Secp256k1::with_caps(ContextFlag::Commit);
-
 		fn commit(value: u64, blinding: SecretKey) -> Commitment {
 			let secp = Secp256k1::with_caps(ContextFlag::Commit);
 			secp.commit(value, blinding).unwrap()
@@ -1346,18 +1336,18 @@ mod tests {
 		let commit_a = commit(3, blind_a.clone());
 		let commit_b = commit(2, blind_b.clone());
 
-		let blind_c = secp.blind_sum(vec![blind_a.clone(), blind_b.clone()], vec![]).unwrap();
+		let blind_c = Secp256k1::blind_sum(vec![blind_a.clone(), blind_b.clone()], vec![]).unwrap();
 
 		let commit_c = commit(3 + 2, blind_c);
 
-		let commit_d = secp.commit_sum(vec![commit_a.clone(), commit_b.clone()], vec![]).unwrap();
+		let commit_d = Secp256k1::commit_sum(vec![commit_a.clone(), commit_b.clone()], vec![]).unwrap();
 		assert_eq!(commit_c, commit_d);
 
-		let blind_e = secp.blind_sum(vec![blind_a.clone()], vec![blind_b.clone()]).unwrap();
+		let blind_e = Secp256k1::blind_sum(vec![blind_a.clone()], vec![blind_b.clone()]).unwrap();
 
 		let commit_e = commit(3 - 2, blind_e);
 
-		let commit_f = secp.commit_sum(vec![commit_a], vec![commit_b]).unwrap();
+		let commit_f = Secp256k1::commit_sum(vec![commit_a], vec![commit_b]).unwrap();
 		assert_eq!(commit_e, commit_f);
 	}
 
@@ -1629,8 +1619,8 @@ mod tests {
 
 				// upfront step: party A and party B generate self commitment and communicate to each other,
 				//   to get the total commitment.
-				let commit = secp
-					.commit_sum(vec![partial_commit_a, partial_commit_b], vec![])
+				let commit = Secp256k1::
+					commit_sum(vec![partial_commit_a, partial_commit_b], vec![])
 					.unwrap();
 				let mut commits = vec![];
 				commits.push(commit);

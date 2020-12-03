@@ -1,4 +1,4 @@
-[![Build Status](https://dev.azure.com/mwcproject/rust-secp256k1-zkp/_apis/build/status/mwcproject.rust-secp256k1-zkp?branchName=master)](https://dev.azure.com/mwcproject/rust-secp256k1-zkp/_build/latest?definitionId=4&branchName=master)
+[![Build Status](https://dev.azure.com/mwc-project/MWC%20Project/_apis/build/status/mwcproject.rust-secp256k1-zkp?branchName=master)](https://dev.azure.com/mwc-project/MWC%20Project/_build/latest?definitionId=11&branchName=master)
 
 ### rust-secp256k1
 

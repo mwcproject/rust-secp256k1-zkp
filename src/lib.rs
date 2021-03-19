@@ -480,11 +480,11 @@ pub enum Error {
 // Passthrough Debug to Display, since errors should be user-visible
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        f.write_str(&self.to_string())
+        f.write_str(self.description())
     }
 }
 
-impl error::Error for Error {
+impl Error {
     fn cause(&self) -> Option<&dyn error::Error> { None }
 
     fn description(&self) -> &str {
@@ -708,6 +708,15 @@ mod tests {
                        IncapableContext};
 
     macro_rules! hex (($hex:expr) => ($hex.from_hex().unwrap()));
+
+    #[test]
+    fn recursion_test() {
+        // recursive call will cause "overflowed its stack" error and panic here.
+        let mut an_err = InvalidSignature;
+        println!("1st error displayed as: {}", an_err.to_string());
+        an_err = InvalidMessage;
+        println!("2nd error displayed as: {}", an_err.to_string());
+    }
 
     #[test]
     fn capabilities() {

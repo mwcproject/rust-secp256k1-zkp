@@ -484,9 +484,11 @@ impl fmt::Display for Error {
     }
 }
 
-impl Error {
+impl error::Error for Error {
     fn cause(&self) -> Option<&dyn error::Error> { None }
+}
 
+impl Error {
     fn description(&self) -> &str {
         match *self {
             Error::IncapableContext => "secp: context does not have sufficient capabilities",

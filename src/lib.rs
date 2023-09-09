@@ -50,7 +50,7 @@ pub extern crate rand;
 extern crate zeroize;
 
 use libc::size_t;
-use std::{error, fmt, ops, ptr};
+use std::{fmt, ops, ptr};
 use rand::Rng;
 
 #[macro_use]
@@ -475,6 +475,8 @@ pub enum Error {
     InvalidRangeProof,
     /// Error creating partial signature
     PartialSigFailure,
+    /// Failure subtracting two signatures
+    SigSubtractionFailure,
 }
 
 // Passthrough Debug to Display, since errors should be user-visible
@@ -489,7 +491,7 @@ impl error::Error for Error {
 }
 
 impl Error {
-    fn description(&self) -> &str {
+    fn as_str(&self) -> &str {
         match *self {
             Error::IncapableContext => "secp: context does not have sufficient capabilities",
             Error::IncorrectSignature => "secp: signature failed verification",
@@ -502,9 +504,22 @@ impl Error {
             Error::IncorrectCommitSum => "secp: invalid pedersen commitment sum",
             Error::InvalidRangeProof => "secp: invalid range proof",
             Error::PartialSigFailure => "secp: partial sig (aggsig) failure",
+            Error::SigSubtractionFailure => "secp: subtraction (aggsig) did not result in any valid signatures",
         }
     }
 }
+
+// Passthrough Debug to Display, since errors should be user-visible
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for Error {
+    fn description(&self) -> &str { self.as_str() }
+}
+
 
 /// The secp256k1 engine, used to execute all signature operations
 pub struct Secp256k1 {

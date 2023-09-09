@@ -479,17 +479,6 @@ pub enum Error {
     SigSubtractionFailure,
 }
 
-// Passthrough Debug to Display, since errors should be user-visible
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        f.write_str(self.description())
-    }
-}
-
-impl error::Error for Error {
-    fn cause(&self) -> Option<&dyn error::Error> { None }
-}
-
 impl Error {
     fn as_str(&self) -> &str {
         match *self {

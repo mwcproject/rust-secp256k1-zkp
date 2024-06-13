@@ -34,7 +34,7 @@ pub const ZERO_256: [u8; 32] = [
 /// msg: the message to sign
 /// seckey: the secret key
 pub fn export_secnonce_single(secp: &Secp256k1) -> Result<SecretKey, Error> {
-	let mut return_key = SecretKey::new(&mut thread_rng());
+	let mut return_key = SecretKey::new(&secp, &mut thread_rng());
 	let mut seed = [0u8; 32];
 	thread_rng().fill(&mut seed);
 	let retval = unsafe {
@@ -424,7 +424,6 @@ impl Drop for AggSigContext {
 
 #[cfg(test)]
 mod tests {
-	extern crate chrono;
 	use super::{
 		add_signatures_single, export_secnonce_single, sign_single, verify_single, verify_batch,
 		AggSigContext, Secp256k1,
@@ -435,7 +434,6 @@ use crate::ffi;
 	use rand::{thread_rng, Rng};
 	use crate::ContextFlag;
 	use crate::{AggSigPartialSignature, Message, Signature};
-	use crate::aggsig::tests::chrono::Utc;
 
 	#[test]
 	fn test_aggsig_multisig() {
@@ -543,7 +541,6 @@ use crate::ffi;
 
 	#[test]
 	fn test_aggsig_batch() {
-		let nano_to_millis = 1.0 / 1_000_000.0;
 		let secp = Secp256k1::with_caps(ContextFlag::Full);
 
 		let mut sigs: Vec<Signature> = vec![];
@@ -567,11 +564,7 @@ use crate::ffi;
 		}
 
 		println!("Verifying aggsig batch of 100");
-		let start = Utc::now().timestamp_nanos();
 		let result = verify_batch(&secp, &sigs, &msgs, &pub_keys);
-		let fin = Utc::now().timestamp_nanos();
-		let dur_ms = (fin - start) as f64 * nano_to_millis;
-		println!("{} signature batch validated in {}ms", 100, dur_ms);
 		assert!(result == true);
 	}
 

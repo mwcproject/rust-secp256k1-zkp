@@ -53,7 +53,6 @@ pub const PEDERSEN_COMMITMENT_SIZE_INTERNAL: usize = 64;
 /// The size of a single Bullet proof
 pub const SINGLE_BULLET_PROOF_SIZE: usize = 675;
 
-/// The max size of a bullet proof
 #[cfg(feature = "bullet-proof-sizing")]
 pub const MAX_PROOF_SIZE: usize = SINGLE_BULLET_PROOF_SIZE;
 /// The max size of a range proof
@@ -63,7 +62,6 @@ pub const MAX_PROOF_SIZE: usize = 5134;
 /// The maximum size of a message embedded in a range proof
 #[cfg(not(feature = "bullet-proof-sizing"))]
 pub const PROOF_MSG_SIZE: usize = 2048;
-/// The maximum size of a message embedded in a bullet proof
 #[cfg(feature = "bullet-proof-sizing")]
 pub const PROOF_MSG_SIZE: usize = 2048;
 

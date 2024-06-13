@@ -120,9 +120,10 @@ mod benches {
 
     #[bench]
     pub fn bench_ecdh(bh: &mut Bencher) {
-        let s = Secp256k1::new();
+        let s = Secp256k1::with_caps(::ContextFlag::SignOnly);
         let (sk, pk) = s.generate_keypair(&mut thread_rng()).unwrap();
 
+        let s = Secp256k1::new();
         bh.iter( || {
             let res = SharedSecret::new(&s, &pk, &sk);
             black_box(res);

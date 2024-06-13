@@ -67,10 +67,10 @@ fn random_32_bytes<R: Rng>(rng: &mut R) -> [u8; 32] {
 impl SecretKey {
     /// Creates a new random secret key
     #[inline]
-    pub fn new<R: Rng>(rng: &mut R) -> SecretKey {
+    pub fn new<R: Rng>(secp: &Secp256k1, rng: &mut R) -> SecretKey {
         let mut data = random_32_bytes(rng);
         unsafe {
-            while ffi::secp256k1_ec_seckey_verify(ffi::secp256k1_context_no_precomp, data.as_ptr()) == 0 {
+            while ffi::secp256k1_ec_seckey_verify(secp.ctx, data.as_ptr()) == 0 {
                 data = random_32_bytes(rng);
             }
         }
@@ -79,13 +79,13 @@ impl SecretKey {
 
     /// Converts a `SECRET_KEY_SIZE`-byte slice to a secret key
     #[inline]
-    pub fn from_slice(data: &[u8])
+    pub fn from_slice(secp: &Secp256k1, data: &[u8])
                         -> Result<SecretKey, Error> {
         match data.len() {
             constants::SECRET_KEY_SIZE => {
                 let mut ret = [0; constants::SECRET_KEY_SIZE];
                 unsafe {
-                    if ffi::secp256k1_ec_seckey_verify(ffi::secp256k1_context_no_precomp, data.as_ptr()) == 0 {
+                    if ffi::secp256k1_ec_seckey_verify(secp.ctx, data.as_ptr()) == 0 {
                         return Err(InvalidSecretKey);
                     }
                 }
@@ -98,10 +98,10 @@ impl SecretKey {
 
     #[inline]
     /// Adds one secret key to another, modulo the curve order
-    pub fn add_assign(&mut self, other: &SecretKey)
+    pub fn add_assign(&mut self, secp: &Secp256k1, other: &SecretKey)
                      -> Result<(), Error> {
         unsafe {
-            if ffi::secp256k1_ec_privkey_tweak_add(ffi::secp256k1_context_no_precomp, self.as_mut_ptr(), other.as_ptr()) != 1 {
+            if ffi::secp256k1_ec_privkey_tweak_add(secp.ctx, self.as_mut_ptr(), other.as_ptr()) != 1 {
                 Err(InvalidSecretKey)
             } else {
                 Ok(())
@@ -111,10 +111,10 @@ impl SecretKey {
 
     #[inline]
     /// Multiplies one secret key by another, modulo the curve order
-    pub fn mul_assign(&mut self, other: &SecretKey)
+    pub fn mul_assign(&mut self, secp: &Secp256k1, other: &SecretKey)
                      -> Result<(), Error> {
         unsafe {
-            if ffi::secp256k1_ec_privkey_tweak_mul(ffi::secp256k1_context_no_precomp, self.as_mut_ptr(), other.as_ptr()) != 1 {
+            if ffi::secp256k1_ec_privkey_tweak_mul(secp.ctx, self.as_mut_ptr(), other.as_ptr()) != 1 {
                 Err(InvalidSecretKey)
             } else {
                 Ok(())
@@ -124,10 +124,10 @@ impl SecretKey {
 
     #[inline]
     /// Inverses the secret key
-    pub fn inv_assign(&mut self)
+    pub fn inv_assign(&mut self, secp: &Secp256k1)
                      -> Result<(), Error> {
         unsafe {
-            if ffi::secp256k1_ec_privkey_tweak_inv(ffi::secp256k1_context_no_precomp, self.as_mut_ptr()) != 1 {
+            if ffi::secp256k1_ec_privkey_tweak_inv(secp.ctx, self.as_mut_ptr()) != 1 {
                 Err(InvalidSecretKey)
             } else {
                 Ok(())
@@ -137,10 +137,10 @@ impl SecretKey {
 
     #[inline]
     /// Negates the secret key
-    pub fn neg_assign(&mut self)
+    pub fn neg_assign(&mut self, secp: &Secp256k1)
                      -> Result<(), Error> {
         unsafe {
-            if ffi::secp256k1_ec_privkey_tweak_neg(ffi::secp256k1_context_no_precomp, self.as_mut_ptr()) != 1 {
+            if ffi::secp256k1_ec_privkey_tweak_neg(secp.ctx, self.as_mut_ptr()) != 1 {
                 Err(InvalidSecretKey)
             } else {
                 Ok(())
@@ -157,14 +157,17 @@ impl PublicKey {
     }
 
     /// Creates a new public key as the sum of the provided keys
-    pub fn from_combination(in_keys: Vec<&PublicKey>)
+    pub fn from_combination(secp: &Secp256k1, in_keys: Vec<&PublicKey>)
                          -> Result<PublicKey, Error> {
         let mut retkey = PublicKey::new();
+        if secp.caps == ContextFlag::SignOnly || secp.caps == ContextFlag::None {
+            return Err(IncapableContext);
+        }
         let in_vec:Vec<*const ffi::PublicKey> = in_keys.iter()
         .map(|pk| pk.as_ptr())
         .collect();
         unsafe {
-            if ffi::secp256k1_ec_pubkey_combine(ffi::secp256k1_context_no_precomp, &mut retkey.0 as *mut _,
+            if ffi::secp256k1_ec_pubkey_combine(secp.ctx, &mut retkey.0 as *mut _,
                                                   in_vec.as_ptr(), in_vec.len() as i32) == 1 {
                 Ok(retkey)
             } else {
@@ -217,11 +220,11 @@ impl PublicKey {
 
     /// Creates a public key directly from a slice
     #[inline]
-    pub fn from_slice(data: &[u8])
+    pub fn from_slice(secp: &Secp256k1, data: &[u8])
                       -> Result<PublicKey, Error> {
         let mut pk = unsafe { ffi::PublicKey::blank() };
         unsafe {
-            if ffi::secp256k1_ec_pubkey_parse(ffi::secp256k1_context_no_precomp, &mut pk, data.as_ptr(),
+            if ffi::secp256k1_ec_pubkey_parse(secp.ctx, &mut pk, data.as_ptr(),
                                               data.len() as ::libc::size_t) == 1 {
                 Ok(PublicKey(pk))
             } else {
@@ -234,13 +237,13 @@ impl PublicKey {
     /// Serialize the key as a byte-encoded pair of values. In compressed form
     /// the y-coordinate is represented by only a single bit, as x determines
     /// it up to one bit.
-    pub fn serialize_vec(&self, compressed: bool) -> ArrayVec<[u8; constants::PUBLIC_KEY_SIZE]> {
+    pub fn serialize_vec(&self, secp: &Secp256k1, compressed: bool) -> ArrayVec<u8, {constants::PUBLIC_KEY_SIZE}> {
         let mut ret = ArrayVec::new();
 
         unsafe {
             let mut ret_len = constants::PUBLIC_KEY_SIZE as ::libc::size_t;
             let compressed = if compressed { ffi::SECP256K1_SER_COMPRESSED } else { ffi::SECP256K1_SER_UNCOMPRESSED };
-            let err = ffi::secp256k1_ec_pubkey_serialize(ffi::secp256k1_context_no_precomp, ret.as_ptr(),
+            let err = ffi::secp256k1_ec_pubkey_serialize(secp.ctx, ret.as_ptr(),
                                                          &mut ret_len, self.as_ptr(),
                                                          compressed);
             debug_assert_eq!(err, 1);
@@ -267,7 +270,7 @@ impl PublicKey {
     }
 
     #[inline]
-    /// Multiplies the pk `self` in place by the scalar `other`
+    /// Muliplies the pk `self` in place by the scalar `other`
     pub fn mul_assign(&mut self, secp: &Secp256k1, other: &SecretKey)
                          -> Result<(), Error> {
         if secp.caps == ContextFlag::SignOnly || secp.caps == ContextFlag::None {
@@ -283,6 +286,7 @@ impl PublicKey {
         }
     }
 }
+
 
 /// Creates a new public key from a FFI public key
 impl From<ffi::PublicKey> for PublicKey {
@@ -309,6 +313,7 @@ impl<'de> Deserialize<'de> for PublicKey {
             {
                 debug_assert!(constants::UNCOMPRESSED_PUBLIC_KEY_SIZE >= constants::COMPRESSED_PUBLIC_KEY_SIZE);
 
+                let s = Secp256k1::with_caps(crate::ContextFlag::None);
                 unsafe {
                     use std::mem;
                     let mut ret: [u8; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE] = mem::MaybeUninit::uninit().assume_init();
@@ -329,7 +334,7 @@ impl<'de> Deserialize<'de> for PublicKey {
 
                     match read_len {
                         constants::UNCOMPRESSED_PUBLIC_KEY_SIZE | constants::COMPRESSED_PUBLIC_KEY_SIZE
-                            => PublicKey::from_slice(&ret[..read_len]).map_err(
+                            => PublicKey::from_slice(&s, &ret[..read_len]).map_err(
                                 |e| match e {
                                         InvalidPublicKey => de::Error::invalid_value(de::Unexpected::Seq, &self),
                                         _ => de::Error::custom(&e.to_string()),
@@ -355,7 +360,8 @@ impl Serialize for PublicKey {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
         where S: Serializer
     {
-        (&self.serialize_vec(true)[..]).serialize(s)
+        let secp = Secp256k1::with_caps(crate::ContextFlag::None);
+        (&self.serialize_vec(&secp, true)[..]).serialize(s)
     }
 }
 
@@ -377,11 +383,13 @@ mod test {
     // To make this test fail, just remove `Zeroize` derive from `SecretKey` definition.
     #[test]
     fn skey_clear_on_drop() {
+        let s = Secp256k1::new();
+
         // Create buffer for blinding factor filled with non-zero bytes.
         let sk_bytes = ONE_KEY;
         let ptr = {
             // Fill blinding factor with some "sensitive" data.
-            let sk = SecretKey::from_slice(&sk_bytes[..]).unwrap();
+            let sk = SecretKey::from_slice(&s, &sk_bytes[..]).unwrap();
             sk.0.as_ptr()
 
             // -- after this line SecretKey should be zeroed.
@@ -403,22 +411,24 @@ mod test {
 
     #[test]
     fn skey_from_slice() {
-        let sk = SecretKey::from_slice(&[1; 31]);
+        let s = Secp256k1::new();
+        let sk = SecretKey::from_slice(&s, &[1; 31]);
         assert_eq!(sk, Err(InvalidSecretKey));
 
-        let sk = SecretKey::from_slice(&[1; 32]);
+        let sk = SecretKey::from_slice(&s, &[1; 32]);
         assert!(sk.is_ok());
     }
 
     #[test]
     fn pubkey_from_slice() {
-        assert_eq!(PublicKey::from_slice(&[]), Err(InvalidPublicKey));
-        assert_eq!(PublicKey::from_slice(&[1, 2, 3]), Err(InvalidPublicKey));
+        let s = Secp256k1::new();
+        assert_eq!(PublicKey::from_slice(&s, &[]), Err(InvalidPublicKey));
+        assert_eq!(PublicKey::from_slice(&s, &[1, 2, 3]), Err(InvalidPublicKey));
 
-        let uncompressed = PublicKey::from_slice(&[4, 54, 57, 149, 239, 162, 148, 175, 246, 254, 239, 75, 154, 152, 10, 82, 234, 224, 85, 220, 40, 100, 57, 121, 30, 162, 94, 156, 135, 67, 74, 49, 179, 57, 236, 53, 162, 124, 149, 144, 168, 77, 74, 30, 72, 211, 229, 110, 111, 55, 96, 193, 86, 227, 183, 152, 195, 155, 51, 247, 123, 113, 60, 228, 188]);
+        let uncompressed = PublicKey::from_slice(&s, &[4, 54, 57, 149, 239, 162, 148, 175, 246, 254, 239, 75, 154, 152, 10, 82, 234, 224, 85, 220, 40, 100, 57, 121, 30, 162, 94, 156, 135, 67, 74, 49, 179, 57, 236, 53, 162, 124, 149, 144, 168, 77, 74, 30, 72, 211, 229, 110, 111, 55, 96, 193, 86, 227, 183, 152, 195, 155, 51, 247, 123, 113, 60, 228, 188]);
         assert!(uncompressed.is_ok());
 
-        let compressed = PublicKey::from_slice(&[3, 23, 183, 225, 206, 31, 159, 148, 195, 42, 67, 115, 146, 41, 248, 140, 11, 3, 51, 41, 111, 180, 110, 143, 114, 134, 88, 73, 198, 174, 52, 184, 78]);
+        let compressed = PublicKey::from_slice(&s, &[3, 23, 183, 225, 206, 31, 159, 148, 195, 42, 67, 115, 146, 41, 248, 140, 11, 3, 51, 41, 111, 180, 110, 143, 114, 134, 88, 73, 198, 174, 52, 184, 78]);
         assert!(compressed.is_ok());
     }
 
@@ -427,25 +437,26 @@ mod test {
         let s = Secp256k1::new();
 
         let (sk1, pk1) = s.generate_keypair(&mut thread_rng()).unwrap();
-        assert_eq!(SecretKey::from_slice(&sk1[..]), Ok(sk1));
-        assert_eq!(PublicKey::from_slice(&pk1.serialize_vec(true)[..]), Ok(pk1));
-        assert_eq!(PublicKey::from_slice(&pk1.serialize_vec(false)[..]), Ok(pk1));
+        assert_eq!(SecretKey::from_slice(&s, &sk1[..]), Ok(sk1));
+        assert_eq!(PublicKey::from_slice(&s, &pk1.serialize_vec(&s, true)[..]), Ok(pk1));
+        assert_eq!(PublicKey::from_slice(&s, &pk1.serialize_vec(&s, false)[..]), Ok(pk1));
     }
 
     #[test]
     fn invalid_secret_key() {
+        let s = Secp256k1::new();
         // Zero
-        assert_eq!(SecretKey::from_slice(&[0; 32]), Err(InvalidSecretKey));
+        assert_eq!(SecretKey::from_slice(&s, &[0; 32]), Err(InvalidSecretKey));
         // -1
-        assert_eq!(SecretKey::from_slice(&[0xff; 32]), Err(InvalidSecretKey));
+        assert_eq!(SecretKey::from_slice(&s, &[0xff; 32]), Err(InvalidSecretKey));
         // Top of range
-        assert!(SecretKey::from_slice(
+        assert!(SecretKey::from_slice(&s,
                                       &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
                                         0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
                                         0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x40]).is_ok());
         // One past top of range
-        assert!(SecretKey::from_slice(
+        assert!(SecretKey::from_slice(&s,
                                       &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
                                         0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
@@ -455,7 +466,7 @@ mod test {
     #[test]
     fn test_pubkey_from_slice_bad_context() {
         let s = Secp256k1::without_caps();
-        let sk = SecretKey::new(&mut thread_rng());
+        let sk = SecretKey::new(&s, &mut thread_rng());
         assert_eq!(PublicKey::from_secret_key(&s, &sk), Err(IncapableContext));
 
         let s = Secp256k1::with_caps(ContextFlag::VerifyOnly);
@@ -582,20 +593,21 @@ mod test {
 
     #[test]
     fn test_pubkey_from_bad_slice() {
+        let s = Secp256k1::new();
         // Bad sizes
-        assert_eq!(PublicKey::from_slice(&[0; constants::COMPRESSED_PUBLIC_KEY_SIZE - 1]),
+        assert_eq!(PublicKey::from_slice(&s, &[0; constants::COMPRESSED_PUBLIC_KEY_SIZE - 1]),
                    Err(InvalidPublicKey));
-        assert_eq!(PublicKey::from_slice(&[0; constants::COMPRESSED_PUBLIC_KEY_SIZE + 1]),
+        assert_eq!(PublicKey::from_slice(&s, &[0; constants::COMPRESSED_PUBLIC_KEY_SIZE + 1]),
                    Err(InvalidPublicKey));
-        assert_eq!(PublicKey::from_slice(&[0; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE - 1]),
+        assert_eq!(PublicKey::from_slice(&s, &[0; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE - 1]),
                    Err(InvalidPublicKey));
-        assert_eq!(PublicKey::from_slice(&[0; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE + 1]),
+        assert_eq!(PublicKey::from_slice(&s, &[0; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE + 1]),
                    Err(InvalidPublicKey));
 
         // Bad parse
-        assert_eq!(PublicKey::from_slice(&[0xff; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE]),
+        assert_eq!(PublicKey::from_slice(&s, &[0xff; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE]),
                    Err(InvalidPublicKey));
-        assert_eq!(PublicKey::from_slice(&[0x55; constants::COMPRESSED_PUBLIC_KEY_SIZE]),
+        assert_eq!(PublicKey::from_slice(&s, &[0x55; constants::COMPRESSED_PUBLIC_KEY_SIZE]),
                    Err(InvalidPublicKey));
     }
 
@@ -642,9 +654,9 @@ mod test {
 
         let s = Secp256k1::new();
         let (_, pk1) = s.generate_keypair(&mut DumbRng(0)).unwrap();
-        assert_eq!(&pk1.serialize_vec(false)[..],
+        assert_eq!(&pk1.serialize_vec(&s, false)[..],
                    &[4, 124, 121, 49, 14, 253, 63, 197, 50, 39, 194, 107, 17, 193, 219, 108, 154, 126, 9, 181, 248, 2, 12, 149, 233, 198, 71, 149, 134, 250, 184, 154, 229, 185, 28, 165, 110, 27, 3, 162, 126, 238, 167, 157, 242, 221, 76, 251, 237, 34, 231, 72, 39, 245, 3, 191, 64, 111, 170, 117, 103, 82, 28, 102, 163][..]);
-        assert_eq!(&pk1.serialize_vec(true)[..],
+        assert_eq!(&pk1.serialize_vec(&s, true)[..],
                    &[3, 124, 121, 49, 14, 253, 63, 197, 50, 39, 194, 107, 17, 193, 219, 108, 154, 126, 9, 181, 248, 2, 12, 149, 233, 198, 71, 149, 134, 250, 184, 154, 229][..]);
     }
 
@@ -656,12 +668,12 @@ mod test {
         let (mut sk2, mut pk2) = s.generate_keypair(&mut thread_rng()).unwrap();
 
         assert_eq!(PublicKey::from_secret_key(&s, &sk1).unwrap(), pk1);
-        assert!(sk1.add_assign(&sk2).is_ok());
+        assert!(sk1.add_assign(&s, &sk2).is_ok());
         assert!(pk1.add_exp_assign(&s, &sk2).is_ok());
         assert_eq!(PublicKey::from_secret_key(&s, &sk1).unwrap(), pk1);
 
         assert_eq!(PublicKey::from_secret_key(&s, &sk2).unwrap(), pk2);
-        assert!(sk2.add_assign(&sk1).is_ok());
+        assert!(sk2.add_assign(&s, &sk1).is_ok());
         assert!(pk2.add_exp_assign(&s, &sk1).is_ok());
         assert_eq!(PublicKey::from_secret_key(&s, &sk2).unwrap(), pk2);
     }
@@ -674,12 +686,12 @@ mod test {
         let (mut sk2, mut pk2) = s.generate_keypair(&mut thread_rng()).unwrap();
 
         assert_eq!(PublicKey::from_secret_key(&s, &sk1).unwrap(), pk1);
-        assert!(sk1.mul_assign(&sk2).is_ok());
+        assert!(sk1.mul_assign(&s, &sk2).is_ok());
         assert!(pk1.mul_assign(&s, &sk2).is_ok());
         assert_eq!(PublicKey::from_secret_key(&s, &sk1).unwrap(), pk1);
 
         assert_eq!(PublicKey::from_secret_key(&s, &sk2).unwrap(), pk2);
-        assert!(sk2.mul_assign(&sk1).is_ok());
+        assert!(sk2.mul_assign(&s, &sk1).is_ok());
         assert!(pk2.mul_assign(&s, &sk1).is_ok());
         assert_eq!(PublicKey::from_secret_key(&s, &sk2).unwrap(), pk2);
     }
@@ -691,7 +703,7 @@ mod test {
         let (sk1, mut pk1) = s.generate_keypair(&mut thread_rng()).unwrap();
         let (sk2, mut pk2) = s.generate_keypair(&mut thread_rng()).unwrap();
 
-        let combined_pk = PublicKey::from_combination(vec![&pk1,&pk2]).unwrap();
+        let combined_pk = PublicKey::from_combination(&s, vec![&pk1,&pk2]).unwrap();
 
         let _ = pk2.add_exp_assign(&s, &sk1);
         let _ = pk1.add_exp_assign(&s, &sk2);
@@ -703,26 +715,26 @@ mod test {
     fn test_inverse() {
         let s = Secp256k1::new();
 
-        let one = SecretKey::from_slice(&[
+        let one = SecretKey::from_slice(&s, &[
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]).unwrap();
 
         let mut one_inv: SecretKey = one.clone();
-        one_inv.inv_assign().unwrap();
+        one_inv.inv_assign(&s).unwrap();
         assert_eq!(one_inv, one);
 
         let (sk1, _) = s.generate_keypair(&mut thread_rng()).unwrap();
         let mut sk2: SecretKey = sk1.clone();
-        sk2.inv_assign().unwrap();
-        sk2.inv_assign().unwrap();
+        sk2.inv_assign(&s).unwrap();
+        sk2.inv_assign(&s).unwrap();
         assert_eq!(sk2, sk1);
 
         let (sk1, _) = s.generate_keypair(&mut thread_rng()).unwrap();
         let mut sk2: SecretKey = sk1.clone();
-        sk2.inv_assign().unwrap();
-        sk2.mul_assign(&sk1).unwrap();
+        sk2.inv_assign(&s).unwrap();
+        sk2.mul_assign(&s, &sk1).unwrap();
         assert_eq!(sk2, one);
     }
 
@@ -732,26 +744,26 @@ mod test {
 
         let (sk1, _) = s.generate_keypair(&mut thread_rng()).unwrap();
         let mut sk2: SecretKey = sk1.clone();
-        sk2.neg_assign().unwrap();
-        assert!(sk2.add_assign(&sk1).is_err());
+        sk2.neg_assign(&s).unwrap();
+        assert!(sk2.add_assign(&s, &sk1).is_err());
 
         let (sk1, _) = s.generate_keypair(&mut thread_rng()).unwrap();
         let mut sk2: SecretKey = sk1.clone();
-        sk2.neg_assign().unwrap();
-        sk2.neg_assign().unwrap();
+        sk2.neg_assign(&s).unwrap();
+        sk2.neg_assign(&s).unwrap();
         assert_eq!(sk2, sk1);
 
         let (mut sk1, _) = s.generate_keypair(&mut thread_rng()).unwrap();
         let mut sk2: SecretKey = sk1.clone();
-        sk1.neg_assign().unwrap();
+        sk1.neg_assign(&s).unwrap();
         let sk1_clone = sk1.clone();
-        sk1.add_assign(&sk1_clone).unwrap();
+        sk1.add_assign(&s, &sk1_clone).unwrap();
         let sk2_clone = sk2.clone();
-        sk2.add_assign(&sk2_clone).unwrap();
-        sk2.neg_assign().unwrap();
+        sk2.add_assign(&s, &sk2_clone).unwrap();
+        sk2.neg_assign(&s).unwrap();
         assert_eq!(sk2, sk1);
 
-        let one = SecretKey::from_slice(&[
+        let one = SecretKey::from_slice(&s, &[
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -759,17 +771,17 @@ mod test {
 
         let (mut sk1, _) = s.generate_keypair(&mut thread_rng()).unwrap();
         let mut sk2: SecretKey = one.clone();
-        sk2.neg_assign().unwrap();
-        sk2.mul_assign(&sk1).unwrap();
-        sk1.neg_assign().unwrap();
+        sk2.neg_assign(&s).unwrap();
+        sk2.mul_assign(&s, &sk1).unwrap();
+        sk1.neg_assign(&s).unwrap();
         assert_eq!(sk2, sk1);
 
         let (mut sk1, _) = s.generate_keypair(&mut thread_rng()).unwrap();
         let mut sk2: SecretKey = sk1.clone();
-        sk1.neg_assign().unwrap();
-        sk1.inv_assign().unwrap();
-        sk2.inv_assign().unwrap();
-        sk2.neg_assign().unwrap();
+        sk1.neg_assign(&s).unwrap();
+        sk1.inv_assign(&s).unwrap();
+        sk2.inv_assign(&s).unwrap();
+        sk2.neg_assign(&s).unwrap();
         assert_eq!(sk2, sk1);
     }
 

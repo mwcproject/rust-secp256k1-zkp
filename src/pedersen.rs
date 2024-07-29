@@ -815,7 +815,7 @@ impl Secp256k1 {
 	pub fn bullet_proof_multisig(
 		&self,
 		value: u64,
-		blind: SecretKey,
+		blind: Option<SecretKey>,
 		nonce: SecretKey,
 		extra_data_in: Option<Vec<u8>>,
 		message: Option<ProofMessage>,
@@ -832,15 +832,23 @@ impl Secp256k1 {
 		let mut proof = [0; constants::MAX_PROOF_SIZE];
 		let mut plen = constants::MAX_PROOF_SIZE as size_t;
 
-		let blind_vec: Vec<SecretKey> = vec![blind];
-		let blind_vec = map_vec!(blind_vec, |p| p.0.as_ptr());
+		let blind_vec;
+		let blind_ptr_vec;
+		let blind_ptr_vec_ptr = if blind.is_some() {
+			blind_vec = vec![blind.unwrap()];
+			blind_ptr_vec = map_vec!(blind_vec, |c| c.as_ptr());
+			blind_ptr_vec.as_ptr()
+		} else {
+			ptr::null()
+		};
+
 		let n_bits = 64;
 
 		let (extra_data_len, extra_data) = match extra_data_in.as_ref() {
 			Some(d) => (d.len(), d.as_ptr()),
 			None => (0, ptr::null()),
 		};
-
+		
 		let mut message = message;
 		let message_ptr = match message.as_mut() {
 			Some(m) => {
@@ -904,7 +912,7 @@ impl Secp256k1 {
 				t_two_ptr,
 				&value,
 				ptr::null(), // min_values: NULL for all-zeroes minimum values to prove ranges above
-				blind_vec.as_ptr(),
+				blind_ptr_vec_ptr,
 				commit_ptr_vec_ptr,
 				1,
 				constants::GENERATOR_H.as_ptr(),
@@ -1564,7 +1572,7 @@ mod tests {
 				let mut t_two_a = PublicKey::new();
 				secp.bullet_proof_multisig(
 					value,
-					blinding_a.clone(),
+					Some(blinding_a.clone()),
 					common_nonce.clone(),
 					extra_data.clone(),
 					message.clone(),
@@ -1581,7 +1589,7 @@ mod tests {
 				let mut t_two_b = PublicKey::new();
 				secp.bullet_proof_multisig(
 					value,
-					blinding_b.clone(),
+					Some(blinding_b.clone()),
 					common_nonce.clone(),
 					extra_data.clone(),
 					message.clone(),
@@ -1608,7 +1616,7 @@ mod tests {
 				let mut tau_x_a = SecretKey::new(&secp, &mut thread_rng());
 				secp.bullet_proof_multisig(
 					value,
-					blinding_a.clone(),
+					Some(blinding_a.clone()),
 					common_nonce.clone(),
 					extra_data.clone(),
 					message.clone(),
@@ -1624,7 +1632,7 @@ mod tests {
 				let mut tau_x_b = SecretKey::new(&secp, &mut thread_rng());
 				secp.bullet_proof_multisig(
 					value,
-					blinding_b.clone(),
+					Some(blinding_b.clone()),
 					common_nonce.clone(),
 					extra_data.clone(),
 					message.clone(),
@@ -1644,7 +1652,7 @@ mod tests {
 				let bullet_proof =
 					secp.bullet_proof_multisig(
 						value,
-						blinding_a.clone(),
+						Some(blinding_a.clone()),
 						common_nonce.clone(),
 						extra_data.clone(),
 						message.clone(),

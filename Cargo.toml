@@ -1,15 +1,15 @@
 [package]
 
-name = "grin_secp256k1zkp"
+name = "mwc_secp256k1zkp"
 version = "0.7.15"
-authors = [ "Grin Developers <mimblewimble@lists.launchpad.net>",
+authors = [ "Mwc Developers <mimblewimble@lists.launchpad.net>",
             "Dawid Ciężarkiewicz <dpc@ucore.info>",
             "Andrew Poelstra <apoelstra@wpsoftware.net>" ]
 license = "CC0-1.0"
 homepage = "https://mwc.mw"
 repository = "https://github.com/mwcproject/rust-secp256k1-zkp/"
-description = "Grin's fork with Zero-Knowledge extensions of Rust bindings for Pieter Wuille's `libsecp256k1` library. Implements ECDSA for the SECG elliptic curve group secp256k1 and related utilities."
-keywords = [ "crypto", "secp256k1", "grin", "bitcoin", "zero-knowledge", "mwc" ]
+description = "Mwc's fork with Zero-Knowledge extensions of Rust bindings for Pieter Wuille's `libsecp256k1` library. Implements ECDSA for the SECG elliptic curve group secp256k1 and related utilities."
+keywords = [ "crypto", "secp256k1", "mwc", "bitcoin", "zero-knowledge", "mwc" ]
 readme = "README.md"
 edition = "2018"
 

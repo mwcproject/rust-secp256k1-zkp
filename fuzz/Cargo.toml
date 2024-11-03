@@ -1,6 +1,6 @@
 
 [package]
-name = "grin_secp256k1zkp-fuzz"
+name = "mwc_secp256k1zkp-fuzz"
 version = "0.0.0"
 authors = ["Automatically generated"]
 publish = false
@@ -12,7 +12,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.3"
 
-[dependencies.grin_secp256k1zkp]
+[dependencies.mwc_secp256k1zkp]
 path = ".."
 
 # Prevent this from interfering with workspaces

@@ -1,7 +1,7 @@
 [package]
 
 name = "mwc_secp256k1zkp"
-version = "0.7.15"
+version = "0.7.16"
 authors = [ "Mwc Developers <mimblewimble@lists.launchpad.net>",
             "Dawid Ciężarkiewicz <dpc@ucore.info>",
             "Andrew Poelstra <apoelstra@wpsoftware.net>" ]

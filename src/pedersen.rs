@@ -19,8 +19,8 @@
 use libc::size_t;
 use std::cmp::min;
 use std::fmt;
-use std::mem;
 use std::ptr;
+use std::sync::OnceLock;
 use std::u64;
 
 use crate::ContextFlag;
@@ -40,23 +40,24 @@ const SCRATCH_SPACE_SIZE: size_t = 256 * MAX_WIDTH;
 const MAX_GENERATORS: size_t = 256;
 
 /// Shared Bullet Proof Generators (avoid recreating every time)
-static mut SHARED_BULLETGENERATORS: Option<*mut ffi::BulletproofGenerators> = None;
+struct SharedGenerators(*mut ffi::BulletproofGenerators);
+unsafe impl Send for SharedGenerators {}
+unsafe impl Sync for SharedGenerators {}
 
-// TODO: Check whether this matters if this is used with a different context; don't think it does
+static SHARED_BULLETGENERATORS: OnceLock<SharedGenerators> = OnceLock::new();
+
 fn shared_generators(ctx: *mut ffi::Context) -> *mut ffi::BulletproofGenerators {
-	unsafe {
-		match SHARED_BULLETGENERATORS.clone() {
-			Some(s) => s,
-			None => {
-				SHARED_BULLETGENERATORS = Some(ffi::secp256k1_bulletproof_generators_create(
+	SHARED_BULLETGENERATORS
+		.get_or_init(|| unsafe {
+			SharedGenerators(
+				ffi::secp256k1_bulletproof_generators_create(
 					ctx,
 					constants::GENERATOR_G.as_ptr(),
 					MAX_GENERATORS,
-				));
-				SHARED_BULLETGENERATORS.unwrap()
-			}
-		}
-	}
+				)
+			)
+		})
+		.0
 }
 
 /// underling lib's representation of a commit, which is now a full 64 bytes
@@ -109,7 +110,7 @@ impl Commitment {
 
 	/// Converts a commitment to a public key
 	pub fn to_pubkey(&self, secp: &Secp256k1) -> Result<key::PublicKey, Error> {
-		let mut pk = unsafe { ffi::PublicKey::blank() };
+		let mut pk = ffi::PublicKey::blank();
 		unsafe {
 			let commit = secp.commit_parse(self.0.clone())?;
 			if ffi::secp256k1_pedersen_commitment_to_pubkey(secp.ctx, &mut pk, commit.as_ptr()) == 1 {
@@ -160,18 +161,16 @@ impl<'di> de::Visitor<'di> for Visitor {
 	where
 		V: de::SeqAccess<'di>,
 	{
-		unsafe {
-			let mut ret: [u8; constants::MAX_PROOF_SIZE] = mem::MaybeUninit::uninit().assume_init();
-			let mut i = 0;
-			while let Some(val) = v.next_element()? {
-				ret[i] = val;
-				i += 1;
-			}
-			Ok(RangeProof {
-				proof: ret,
-				plen: i,
-			})
+		let mut ret: [u8; constants::MAX_PROOF_SIZE] = [0u8; constants::MAX_PROOF_SIZE];
+		let mut i = 0;
+		while let Some(val) = v.next_element()? {
+			ret[i] = val;
+			i += 1;
 		}
+		Ok(RangeProof {
+			proof: ret,
+			plen: i,
+		})
 	}
 }
 
@@ -521,7 +520,7 @@ impl Secp256k1 {
 		let mut neg = map_vec!(negative, |n| n.as_ptr());
 		let mut all = map_vec!(positive, |p| p.as_ptr());
 		all.append(&mut neg);
-		let mut ret: [u8; 32] = unsafe { mem::MaybeUninit::uninit().assume_init() };
+		let mut ret: [u8; 32] = [0u8; 32];
 		unsafe {
 			assert_eq!(
 				ffi::secp256k1_pedersen_blind_sum(
@@ -543,7 +542,7 @@ impl Secp256k1 {
 		if self.caps != ContextFlag::Commit {
 			return Err(Error::IncapableContext);
 		}
-		let mut ret: [u8; 32] = unsafe { mem::MaybeUninit::uninit().assume_init() };
+		let mut ret: [u8; 32] = [0u8; 32];
 		unsafe {
 			assert_eq!(
 				ffi::secp256k1_blind_switch(
@@ -674,8 +673,8 @@ impl Secp256k1 {
 		nonce: SecretKey,
 	) -> ProofInfo {
 		let mut value: u64 = 0;
-		let mut blind: [u8; 32] = unsafe { mem::MaybeUninit::uninit().assume_init() };
-		let mut message: [u8; constants::PROOF_MSG_SIZE] = unsafe { mem::MaybeUninit::uninit().assume_init() };
+		let mut blind: [u8; 32] = [0u8; 32];
+		let mut message: [u8; constants::PROOF_MSG_SIZE] = [0u8; constants::PROOF_MSG_SIZE];
 		let mut mlen: usize = constants::PROOF_MSG_SIZE;
 		let mut min: u64 = 0;
 		let mut max: u64 = 0;
@@ -1903,21 +1902,21 @@ mod tests {
 			}
 			println!("--------");
 			println!("Comparing {} Proofs", v);
-			let start = Utc::now().timestamp_nanos();
+			let start = Utc::now().timestamp_nanos_opt().unwrap();
 			for i in 0..v {
 				let proof_range = secp
 					.verify_bullet_proof(commits[i].clone(), proofs[i].clone(), None)
 					.unwrap();
 				assert_eq!(proof_range.min, 0);
 			}
-			let fin = Utc::now().timestamp_nanos();
+			let fin = Utc::now().timestamp_nanos_opt().unwrap();
 			let dur_ms = (fin - start) as f64 * nano_to_millis;
 			println!("{} proofs single validated in {}ms", v, dur_ms);
 
-			let start = Utc::now().timestamp_nanos();
+			let start = Utc::now().timestamp_nanos_opt().unwrap();
 			let proof_range = secp.verify_bullet_proof_multi(commits.clone(), proofs.clone(), None);
 			assert!(!proof_range.is_err());
-			let fin = Utc::now().timestamp_nanos();
+			let fin = Utc::now().timestamp_nanos_opt().unwrap();
 			let dur_ms = (fin - start) as f64 * nano_to_millis;
 			println!("{} proofs batch validated in {}ms", v, dur_ms);
 		}

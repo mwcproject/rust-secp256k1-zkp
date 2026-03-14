@@ -47,5 +47,6 @@ fn main() {
     // secp256k1-zkp
     base_config.file("depend/secp256k1-zkp/contrib/lax_der_parsing.c")
                .file("depend/secp256k1-zkp/src/secp256k1.c")
+               .flag("-Wno-unused-function")
                .compile("libsecp256k1.a");
 }

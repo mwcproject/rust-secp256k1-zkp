@@ -554,10 +554,10 @@ use crate::ffi;
 
 			let msg = Message::from_slice(&msg).unwrap();
 			let sig = sign_single(&secp, &msg, &sk, None, None, None, Some(&pk), None).unwrap();
-			
+
 			let result_single = verify_single(&secp, &sig, &msg, None, &pk, Some(&pk), None, false);
 			assert!(result_single == true);
-			
+
 			pub_keys.push(pk);
 			msgs.push(msg);
 			sigs.push(sig);

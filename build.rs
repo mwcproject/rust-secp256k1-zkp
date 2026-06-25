@@ -21,12 +21,13 @@
 #![deny(unused_mut)]
 #![warn(missing_docs)]
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut base_config = cc::Build::new();
     base_config.include("depend/secp256k1-zkp/")
                .include("depend/secp256k1-zkp/include")
                .include("depend/secp256k1-zkp/src")
-               .flag("-g")
+                // -g is for debug. Removing for release build
+                //.flag("-g")
                // TODO these three should be changed to use libgmp, at least until secp PR 290 is merged
                .define("USE_NUM_NONE", Some("1"))
                .define("USE_FIELD_INV_BUILTIN", Some("1"))
@@ -48,10 +49,11 @@ fn main() {
     base_config.file("depend/secp256k1-zkp/contrib/lax_der_parsing.c")
                .file("depend/secp256k1-zkp/src/secp256k1.c");
 
-    let compiler = base_config.get_compiler();
+    let compiler = base_config.try_get_compiler()?;
     if compiler.is_like_gnu() || compiler.is_like_clang() {
         base_config.flag("-Wno-unused-function");
     }
 
-    base_config.compile("libsecp256k1.a");
+    base_config.try_compile("libsecp256k1.a")?;
+    Ok(())
 }

@@ -32,25 +32,17 @@
 #![deny(unused_mut)]
 #![warn(missing_docs)]
 
-#![cfg_attr(feature = "dev", allow(unstable_features))]
-#![cfg_attr(feature = "dev", feature(plugin))]
-#![cfg_attr(feature = "dev", plugin(clippy))]
-
 #![cfg_attr(all(test, feature = "unstable"), feature(test))]
 #[cfg(all(test, feature = "unstable"))] extern crate test;
 
-extern crate arrayvec;
-extern crate serde;
 extern crate serde_json as json;
-
-extern crate libc;
-pub extern crate rand;
-
-extern crate zeroize;
 
 use libc::size_t;
 use std::{fmt, ops, ptr};
-use rand::Rng;
+use std::ptr::NonNull;
+use rand::rngs::SysRng;
+use rand::TryCryptoRng;
+use zeroize::Zeroize;
 
 #[macro_use]
 mod macros;
@@ -64,18 +56,65 @@ pub mod aggsig;
 pub use key::SecretKey;
 pub use key::PublicKey;
 
+// Reexport crates, so mwc can reuse them
+pub use arrayvec;
+pub use rand;
+pub use libc;
+pub use serde;
+pub use serde_json;
+pub use zeroize;
+
 /// A tag used for recovering the public key from a compact signature
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct RecoveryId(i32);
 
 /// An ECDSA signature
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct Signature(ffi::Signature);
+pub struct EcdsaSignature(ffi::Signature);
 
-impl std::convert::AsRef<[u8]> for Signature {
-    fn as_ref(&self) -> &[u8] {
-        &self.0.as_ref()
+/// An aggsig / Schnorr signature in aggsig's 64-byte format
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct AggSigSignature(ffi::Signature);
+
+const SECP256K1_FIELD_PRIME: [u8; 32] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFE, 0xFF, 0xFF, 0xFC, 0x2F,
+];
+
+fn b32_is_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == 0)
+}
+
+fn b32_is_less_than(bytes: &[u8], upper_bound: &[u8; 32]) -> bool {
+    if bytes.len() != 32 {
+        return false;
     }
+    for (byte, upper) in bytes.iter().zip(upper_bound.iter()) {
+        if byte < upper {
+            return true;
+        }
+        if byte > upper {
+            return false;
+        }
+    }
+    false
+}
+
+fn aggsig_rx_bytes_are_valid(bytes: &[u8]) -> bool {
+    bytes.len() == 32 && !b32_is_zero(bytes) && b32_is_less_than(bytes, &SECP256K1_FIELD_PRIME)
+}
+
+fn aggsig_rx_lifts_to_point(secp: &Secp256k1, bytes: &[u8]) -> bool {
+    if !aggsig_rx_bytes_are_valid(bytes) {
+        return false;
+    }
+
+    let mut compressed = [0u8; constants::COMPRESSED_PUBLIC_KEY_SIZE];
+    compressed[0] = 0x02;
+    compressed[1..].copy_from_slice(bytes);
+    PublicKey::from_slice(secp, &compressed).is_ok()
 }
 
 /// An AggSig partial signature
@@ -109,54 +148,143 @@ impl RecoveryId {
     }
 }
 
-impl Signature {
+macro_rules! impl_signature_wrapper {
+    ($name:ident) => {
+        impl $name {
+            /// Create a new (zeroed) signature usable for the FFI interface
+            pub fn new() -> $name {
+                $name(ffi::Signature::new())
+            }
+
+            /// Obtains a raw pointer suitable for use with FFI functions
+            #[inline]
+            pub fn as_ptr(&self) -> *const ffi::Signature {
+                &self.0 as *const _
+            }
+
+            /// Obtains a raw mutable pointer suitable for use with FFI functions
+            #[inline]
+            pub fn as_mut_ptr(&mut self) -> *mut ffi::Signature {
+                &mut self.0 as *mut _
+            }
+        }
+
+        impl ops::Index<usize> for $name {
+            type Output = u8;
+
+            #[inline]
+            fn index(&self, index: usize) -> &u8 {
+                &self.0[index]
+            }
+        }
+
+        impl ops::Index<ops::Range<usize>> for $name {
+            type Output = [u8];
+
+            #[inline]
+            fn index(&self, index: ops::Range<usize>) -> &[u8] {
+                &self.0[index]
+            }
+        }
+
+        impl ops::Index<ops::RangeFrom<usize>> for $name {
+            type Output = [u8];
+
+            #[inline]
+            fn index(&self, index: ops::RangeFrom<usize>) -> &[u8] {
+                &self.0[index.start..]
+            }
+        }
+
+        impl ops::Index<ops::RangeFull> for $name {
+            type Output = [u8];
+
+            #[inline]
+            fn index(&self, _: ops::RangeFull) -> &[u8] {
+                &self.0[..]
+            }
+        }
+    };
+}
+
+// Note: EcdsaSignature storing data in internal format, not in not a canonical DER or 64-byte compact encoding
+//     Use raw data access for logs and debug.
+impl_signature_wrapper!(EcdsaSignature);
+impl_signature_wrapper!(AggSigSignature);
+
+// Note: This API exposing signature internals. We understand that it is not a good way to expose signature,
+//    but there is a legacy code that already using that, we can't switch to compact style for signature data.
+impl std::convert::AsRef<[u8]> for AggSigSignature {
+    fn as_ref(&self) -> &[u8] {
+        &self.0.as_ref()
+    }
+}
+
+impl EcdsaSignature {
+    /// Checks whether the signature is non-zero and compact-serializes to scalars in range.
+    /// This validates encoding shape only; it does not verify the signature against a message.
+    pub fn is_valid(&self, secp: &Secp256k1) -> bool {
+        match self.serialize_compact(secp) {
+            Ok(compact) => {
+                SecretKey::from_slice(secp, &compact[..32]).is_ok() &&
+                SecretKey::from_slice(secp, &compact[32..]).is_ok()
+            }
+            Err(_) => false,
+        }
+    }
+
     #[inline]
     /// Converts a DER-encoded byte slice to a signature
-    pub fn from_der(secp: &Secp256k1, data: &[u8]) -> Result<Signature, Error> {
-        let mut ret = ffi::Signature::blank();
+    /// Note: Error InvalidSignature might be related to some invariant failures
+    pub fn from_der(secp: &Secp256k1, data: &[u8]) -> Result<EcdsaSignature, Error> {
+        let mut ret = EcdsaSignature::new();
 
         unsafe {
-            if ffi::secp256k1_ecdsa_signature_parse_der(secp.ctx, &mut ret,
-                                                        data.as_ptr(), data.len() as libc::size_t) == 1 {
-                Ok(Signature(ret))
+            if ffi::secp256k1_ecdsa_signature_parse_der(secp.ctx, ret.as_mut_ptr(),
+                                                        data.as_ptr(), data.len() as libc::size_t) == 1
+                && ret.is_valid(secp)
+            {
+                Ok(ret)
             } else {
                 Err(Error::InvalidSignature)
             }
         }
     }
 
-    /// Converts a 64-byte compact-encoded byte slice to a signature
-    pub fn from_compact(secp: &Secp256k1, data: &[u8]) -> Result<Signature, Error> {
-        let mut ret = ffi::Signature::blank();
+    /// Converts a 64-byte compact-encoded byte slice to a signature.
+    /// Note: Error InvalidSignature might be related to some invariant failures
+    pub fn from_compact(secp: &Secp256k1, data: &[u8]) -> Result<EcdsaSignature, Error> {
+        let mut ret = EcdsaSignature::new();
         if data.len() != 64 {
             return Err(Error::InvalidSignature);
         }
 
-        unsafe {
-            if ffi::secp256k1_ecdsa_signature_parse_compact(secp.ctx, &mut ret,
-                                                            data.as_ptr()) == 1 {
-                Ok(Signature(ret))
-            } else {
-                Err(Error::InvalidSignature)
+        let ok = unsafe {
+            ffi::secp256k1_ecdsa_signature_parse_compact(secp.ctx, ret.as_mut_ptr(),
+                                                            data.as_ptr())
+        };
+
+        if ok==1 {
+            if ret.is_valid(secp) {
+                return Ok(ret);
             }
         }
-    }
-
-    /// Stores raw bytes provided as a signature, with no conversion
-    pub fn from_raw_data(data: &[u8;64]) -> Result<Signature, Error> {
-        Ok(Signature(ffi::Signature::from_data(data.clone())))
+        Err(Error::InvalidSignature)
     }
 
     /// Converts a "lax DER"-encoded byte slice to a signature. This is basically
     /// only useful for validating signatures in the Bitcoin blockchain from before
     /// 2016. It should never be used in new applications. This library does not
     /// support serializing to this "format"
-    pub fn from_der_lax(secp: &Secp256k1, data: &[u8]) -> Result<Signature, Error> {
+    /// Note: This method return "DER shape was tolerated” with “signature parsed successfully."
+    ///     Malformed signature canbe created because of that parsing.
+    /// Note:  mwc-node & mwc-wallet should never use this API.
+    pub fn from_der_lax(secp: &Secp256k1, data: &[u8]) -> Result<EcdsaSignature, Error> {
         unsafe {
-            let mut ret = ffi::Signature::blank();
-            if ffi::ecdsa_signature_parse_der_lax(secp.ctx, &mut ret,
+            let mut ret = EcdsaSignature::new();
+            if ffi::ecdsa_signature_parse_der_lax(secp.ctx, ret.as_mut_ptr(),
                                                   data.as_ptr(), data.len() as libc::size_t) == 1 {
-                Ok(Signature(ret))
+                Ok(ret)
             } else {
                 Err(Error::InvalidSignature)
             }
@@ -180,85 +308,189 @@ impl Signature {
     /// valid. (For example, parsing the historic Bitcoin blockchain requires
     /// this.) For these applications we provide this normalization function,
     /// which ensures that the s value lies in the lower half of its range.
-    pub fn normalize_s(&mut self, secp: &Secp256k1) {
-        unsafe {
+    pub fn normalize_s(&mut self, secp: &Secp256k1) -> Result<(), Error> {
+        let ok = unsafe {
             // Ignore return value, which indicates whether the sig
             // was already normalized. We don't care.
             ffi::secp256k1_ecdsa_signature_normalize(secp.ctx, self.as_mut_ptr(),
-                                                     self.as_ptr());
+                                                     self.as_ptr())
+        };
+        if ok == 0 {
+            Err(Error::InvalidSignature)
         }
-    }
-
-    /// Obtains a raw pointer suitable for use with FFI functions
-    #[inline]
-    pub fn as_ptr(&self) -> *const ffi::Signature {
-        &self.0 as *const _
-    }
-
-    /// Obtains a raw mutable pointer suitable for use with FFI functions
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::Signature {
-        &mut self.0 as *mut _
+        else {
+            Ok(())
+        }
     }
 
     #[inline]
     /// Serializes the signature in DER format
-    pub fn serialize_der(&self, secp: &Secp256k1) -> Vec<u8> {
-        let mut ret = Vec::with_capacity(72);
-        let mut len: size_t = ret.capacity() as size_t;
-        unsafe {
-            let err = ffi::secp256k1_ecdsa_signature_serialize_der(secp.ctx, ret.as_mut_ptr(),
-                                                                   &mut len, self.as_ptr());
-            debug_assert!(err == 1);
-            ret.set_len(len as usize);
+    pub fn serialize_der(&self, secp: &Secp256k1) -> Result<Vec<u8>, Error> {
+        const RES_CAPACITY : usize = 72;
+        let mut ret = vec![0; RES_CAPACITY];
+        let mut len: size_t = ret.len() as size_t;
+        let ok = unsafe {
+            ffi::secp256k1_ecdsa_signature_serialize_der(secp.ctx, ret.as_mut_ptr(),
+                                                                   &mut len, self.as_ptr())
+        };
+        if ok==1 && len<=RES_CAPACITY {
+            ret.truncate(len as usize);
+            Ok(ret)
         }
-        ret
+        else {
+            Err(Error::SerializationError)
+        }
+
     }
 
     #[inline]
     /// Serializes the signature in compact format
-    pub fn serialize_compact(&self, secp: &Secp256k1) -> [u8; 64] {
+    pub fn serialize_compact(&self, secp: &Secp256k1) -> Result<[u8; 64], Error> {
         let mut ret = [0; 64];
-        unsafe {
-            let err = ffi::secp256k1_ecdsa_signature_serialize_compact(secp.ctx, ret.as_mut_ptr(),
-                                                                       self.as_ptr());
-            debug_assert!(err == 1);
+        let ok = unsafe {
+            ffi::secp256k1_ecdsa_signature_serialize_compact(secp.ctx, ret.as_mut_ptr(),
+                                                                       self.as_ptr())
+        };
+        if ok==1 {
+            Ok(ret)
         }
-        ret
+        else {
+            Err(Error::SerializationError)
+        }
     }
 
-    #[inline]
-    /// Just return raw data, no conversion tricks
-    pub fn to_raw_data(&self) -> [u8; 64] {
-        (self.0).0.clone()
-    }
 }
 
-impl serde::Serialize for Signature {
+impl AggSigSignature {
+    /// Blank invalid signature
+    pub fn blank() -> AggSigSignature {
+        AggSigSignature(ffi::Signature([0u8; constants::AGG_SIGNATURE_SIZE]))
+    }
+
+    /// Checks whether the aggsig signature is well-formed as a 64-byte `(R.x || s)` encoding.
+    ///
+    /// This validates encoding shape only; it does not verify the signature against a message.
+    /// Note: It rejects `s == 0` signature which can be false positive. We are accepting that
+    ///    because we want to reject the blank signatures
+    pub fn is_valid(&self, secp: &Secp256k1) -> bool {
+        aggsig_rx_lifts_to_point(secp, &self[0..32]) &&
+        SecretKey::from_slice(secp, &self[32..]).is_ok()
+    }
+
+    /// Converts a 64-byte compact-encoded byte slice to a signature.
+    /// Note: compact format is slightly different from raw format, the 32 byte parts are swapped.
+    /// Note: Error InvalidSignature might be related to some invariant failures
+    pub fn from_compact(secp: &Secp256k1, data: &[u8]) -> Result<AggSigSignature, Error> {
+        let mut ret = AggSigSignature::new();
+        if data.len() != 64 {
+            return Err(Error::InvalidSignature);
+        }
+
+        let ok = unsafe {
+            ffi::secp256k1_ecdsa_signature_parse_compact(secp.ctx, ret.as_mut_ptr(),
+                                                         data.as_ptr())
+        };
+
+        if ok==1 {
+            if ret.is_valid(secp) {
+                return Ok(ret);
+            }
+        }
+        Err(Error::InvalidSignature)
+    }
+
+    /// Serializes the aggsig signature through the legacy ECDSA compact serializer.
+    ///
+    /// This is not the raw aggsig `(R.x || s)` wire encoding. Use `to_raw_data` when the caller
+    /// needs to preserve aggsig bytes exactly, such as JSON or network interchange.
+    pub fn serialize_compact(
+        &self,
+        secp: &Secp256k1,
+    ) -> Result<[u8; constants::AGG_SIGNATURE_SIZE], Error> {
+        let mut ret = [0; 64];
+        let ok = unsafe {
+            ffi::secp256k1_ecdsa_signature_serialize_compact(secp.ctx, ret.as_mut_ptr(),
+                                                             self.as_ptr())
+        };
+        if ok==1 {
+            Ok(ret)
+        }
+        else {
+            Err(Error::SerializationError)
+        }
+    }
+
+    /// Returns the raw aggsig `(R.x || s)` bytes after validating the signature shape.
+    ///
+    /// Aggsig signatures are stored internally in the same raw wire format used by aggsig
+    /// serialization. This method exists so aggsig callers do not need to go through the ECDSA
+    /// compact serializer, which can transform the bytes and is the wrong encoding for Schnorr
+    /// aggsig interchange.
+    pub fn to_raw_data(
+        &self,
+        secp: &Secp256k1,
+    ) -> Result<[u8; constants::AGG_SIGNATURE_SIZE], Error> {
+        if !self.is_valid(secp) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(self.0.0)
+    }
+
+    /// Serializes the raw aggsig `(R.x || s)` wire bytes without ECDSA conversion.
+    ///
+    /// This is an alias for `to_raw_data` with a serialization-oriented name for call sites that
+    /// are writing aggsig signatures to external formats.
+    pub fn serialize_raw(
+        &self,
+        secp: &Secp256k1,
+    ) -> Result<[u8; constants::AGG_SIGNATURE_SIZE], Error> {
+        self.to_raw_data(secp)
+    }
+
+    /// Stores raw bytes provided as a signature, with no conversion
+    pub fn from_raw_data(secp: &Secp256k1, data: &[u8;constants::AGG_SIGNATURE_SIZE]) -> Result<AggSigSignature, Error> {
+        let sign = AggSigSignature(ffi::Signature(data.clone()));
+        if sign.is_valid(secp) {
+            Ok(sign)
+        }
+        else {
+            Err(Error::InvalidSignature)
+        }
+    }
+
+}
+
+impl serde::Serialize for EcdsaSignature {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
         where S: serde::Serializer
     {
-        let secp = Secp256k1::with_caps(crate::ContextFlag::None);
-        (&self.serialize_compact(&secp)[..]).serialize(s)
+        let secp = Secp256k1::with_caps(ContextFlag::None)
+            .map_err(|e| serde::ser::Error::custom(format!("Failed to create secp context, {}", e)))?;
+        (&self.serialize_compact(&secp)
+            .map_err(|e| serde::ser::Error::custom(format!("Signature serialization error, {}", e)))?
+            [..]
+        ).serialize(s)
     }
 }
 
-impl<'de> serde::Deserialize<'de> for Signature {
-    fn deserialize<D>(d: D) -> Result<Signature, D::Error>
+impl<'de> serde::Deserialize<'de> for EcdsaSignature {
+    fn deserialize<D>(d: D) -> Result<EcdsaSignature, D::Error>
         where D: serde::Deserializer<'de>
     {
         use serde::de;
         struct Visitor {
-            marker: std::marker::PhantomData<Signature>,
+            marker: std::marker::PhantomData<EcdsaSignature>,
         }
         impl<'de> de::Visitor<'de> for Visitor {
-            type Value = Signature;
+            type Value = EcdsaSignature;
 
             #[inline]
-            fn visit_seq<A>(self, mut a: A) -> Result<Signature, A::Error>
+            fn visit_seq<A>(self, mut a: A) -> Result<EcdsaSignature, A::Error>
                 where A: de::SeqAccess<'de>
             {
-                let s = Secp256k1::with_caps(crate::ContextFlag::None);
+                let s = Secp256k1::with_caps(ContextFlag::None)
+                    .map_err(|e| serde::de::Error::custom(format!("Failed to create secp context, {}", e)))?;
+
                 let mut ret: [u8; constants::COMPACT_SIGNATURE_SIZE] = [0u8; constants::COMPACT_SIGNATURE_SIZE];
 
                 for i in 0..constants::COMPACT_SIGNATURE_SIZE {
@@ -272,7 +504,7 @@ impl<'de> serde::Deserialize<'de> for Signature {
                     return Err(serde::de::Error::invalid_length(constants::COMPACT_SIGNATURE_SIZE + 1, &self));
                 }
 
-                Signature::from_compact(&s, &ret).map_err(
+                EcdsaSignature::from_compact(&s, &ret).map_err(
                     |e| match e {
                         Error::InvalidSignature => de::Error::invalid_value(de::Unexpected::Seq, &self),
                         _ => de::Error::custom(&e.to_string()),
@@ -291,14 +523,6 @@ impl<'de> serde::Deserialize<'de> for Signature {
     }
 }
 
-/// Creates a new signature from a FFI signature
-impl From<ffi::Signature> for Signature {
-    #[inline]
-    fn from(sig: ffi::Signature) -> Signature {
-        Signature(sig)
-    }
-}
-
 impl AggSigPartialSignature {
     /// Obtains a raw pointer suitable for use with FFI functions
     #[inline]
@@ -311,6 +535,13 @@ impl AggSigPartialSignature {
     pub fn as_mut_ptr(&mut self) -> *mut ffi::AggSigPartialSignature {
         &mut self.0 as *mut _
     }
+
+    /// Copy of ffi representaiton of the signature
+    #[inline]
+    pub fn as_ffi(&self) -> ffi::AggSigPartialSignature {
+        self.0
+    }
+
 }
 
 /// Creates a new signature from a FFI signature
@@ -323,22 +554,33 @@ impl From<ffi::AggSigPartialSignature> for AggSigPartialSignature {
 
 
 impl RecoverableSignature {
+    /// Create a new zero filled instance of signature
+    pub fn new() -> RecoverableSignature
+    {
+        RecoverableSignature(crate::ffi::RecoverableSignature::new())
+    }
+
     #[inline]
     /// Converts a compact-encoded byte slice to a signature. This
     /// representation is nonstandard and defined by the libsecp256k1
     /// library.
     pub fn from_compact(secp: &Secp256k1, data: &[u8], recid: RecoveryId) -> Result<RecoverableSignature, Error> {
-        let mut ret = ffi::RecoverableSignature::blank();
+        let mut ret = RecoverableSignature::new();
 
-        unsafe {
-            if data.len() != 64 {
-                Err(Error::InvalidSignature)
-            } else if ffi::secp256k1_ecdsa_recoverable_signature_parse_compact(secp.ctx, &mut ret,
-                                                                               data.as_ptr(), recid.0) == 1 {
-                Ok(RecoverableSignature(ret))
-            } else {
-                Err(Error::InvalidSignature)
-            }
+        if data.len() != 64 {
+            return Err(Error::InvalidSignature);
+        }
+
+        let ok = unsafe {
+            ffi::secp256k1_ecdsa_recoverable_signature_parse_compact(secp.ctx, ret.as_mut_ptr(),
+                                                                     data.as_ptr(), recid.0)
+        };
+
+        if ok == 1 {
+            Ok(ret)
+        } else
+        {
+            Err(Error::InvalidSignature)
         }
     }
 
@@ -348,73 +590,45 @@ impl RecoverableSignature {
         &self.0 as *const _
     }
 
+    /// Obtains a raw mutable pointer suitable for use with FFI functions
+    #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::RecoverableSignature {
+        &mut self.0 as *mut _
+    }
+
     #[inline]
     /// Serializes the recoverable signature in compact format
-    pub fn serialize_compact(&self, secp: &Secp256k1) -> (RecoveryId, [u8; 64]) {
+    pub fn serialize_compact(&self, secp: &Secp256k1) -> Result<(RecoveryId, [u8; 64]), Error> {
         let mut ret = [0u8; 64];
         let mut recid = 0i32;
-        unsafe {
-            let err = ffi::secp256k1_ecdsa_recoverable_signature_serialize_compact(
-                secp.ctx, ret.as_mut_ptr(), &mut recid, self.as_ptr());
-            assert!(err == 1);
+        let err = unsafe {
+            ffi::secp256k1_ecdsa_recoverable_signature_serialize_compact(
+                secp.ctx, ret.as_mut_ptr(), &mut recid, self.as_ptr())
+        };
+
+        if err==1 {
+            Ok((RecoveryId(recid), ret))
         }
-        (RecoveryId(recid), ret)
+        else {
+            Err(Error::InvalidSignature)
+        }
     }
 
     /// Converts a recoverable signature to a non-recoverable one (this is needed
     /// for verification
+    /// Note: Error InvalidSignature might be related to some invariant failures
     #[inline]
-    pub fn to_standard(&self, secp: &Secp256k1) -> Signature {
-        let mut ret = ffi::Signature::blank();
-        unsafe {
-            let err = ffi::secp256k1_ecdsa_recoverable_signature_convert(secp.ctx, &mut ret, self.as_ptr());
-            assert!(err == 1);
+    pub fn to_standard(&self, secp: &Secp256k1) -> Result<EcdsaSignature, Error> {
+        let mut ret = EcdsaSignature::new();
+        let ok = unsafe {
+            ffi::secp256k1_ecdsa_recoverable_signature_convert(secp.ctx, ret.as_mut_ptr(), self.as_ptr())
+        };
+        if ok==1 && ret.is_valid(secp) {
+            Ok(ret)
         }
-        Signature(ret)
-    }
-}
-
-/// Creates a new recoverable signature from a FFI one
-impl From<ffi::RecoverableSignature> for RecoverableSignature {
-    #[inline]
-    fn from(sig: ffi::RecoverableSignature) -> RecoverableSignature {
-        RecoverableSignature(sig)
-    }
-}
-
-impl ops::Index<usize> for Signature {
-    type Output = u8;
-
-    #[inline]
-    fn index(&self, index: usize) -> &u8 {
-        &self.0[index]
-    }
-}
-
-impl ops::Index<ops::Range<usize>> for Signature {
-    type Output = [u8];
-
-    #[inline]
-    fn index(&self, index: ops::Range<usize>) -> &[u8] {
-        &self.0[index]
-    }
-}
-
-impl ops::Index<ops::RangeFrom<usize>> for Signature {
-    type Output = [u8];
-
-    #[inline]
-    fn index(&self, index: ops::RangeFrom<usize>) -> &[u8] {
-        &self.0[index.start..]
-    }
-}
-
-impl ops::Index<ops::RangeFull> for Signature {
-    type Output = [u8];
-
-    #[inline]
-    fn index(&self, _: ops::RangeFull) -> &[u8] {
-        &self.0[..]
+        else {
+            Err(Error::InvalidSignature)
+        }
     }
 }
 
@@ -422,6 +636,7 @@ impl ops::Index<ops::RangeFull> for Signature {
 pub struct Message([u8; constants::MESSAGE_SIZE]);
 impl Copy for Message {}
 impl_array_newtype!(Message, u8, constants::MESSAGE_SIZE);
+// Note, message doesn't contain sensitive data, so it can be dumped with Debug output
 impl_pretty_debug!(Message);
 
 impl Message {
@@ -465,6 +680,8 @@ pub enum Error {
     InvalidSignature,
     /// Bad secret key
     InvalidSecretKey,
+    /// Secret key is zero
+    ZeroSecretKey,
     /// Bad recovery id
     InvalidRecoveryId,
     /// Summing commitments led to incorrect result
@@ -475,6 +692,22 @@ pub enum Error {
     PartialSigFailure,
     /// Failure subtracting two signatures
     SigSubtractionFailure,
+    /// System random generator error
+    SysRngFailure,
+    /// Generic Secp Error, should be almost impossible to hit
+    GenericError,
+    /// Range proof generation failure. Very small chance
+    RangeProofGeneration,
+    /// Nonce export failure
+    NonceExportError,
+    /// Invalid parameters
+    InvalidParameters,
+    /// Serialization error
+    SerializationError,
+    /// Instance allcotion error
+    AllocationError,
+    /// AggSigContext is broken
+    BrokenAggSigContext,
 }
 
 impl Error {
@@ -487,35 +720,43 @@ impl Error {
             Error::InvalidCommit => "secp: malformed commit",
             Error::InvalidSignature => "secp: malformed signature",
             Error::InvalidSecretKey => "secp: malformed or out-of-range secret key",
+            Error::ZeroSecretKey => "secp: zero secret key",
             Error::InvalidRecoveryId => "secp: bad recovery id",
             Error::IncorrectCommitSum => "secp: invalid pedersen commitment sum",
             Error::InvalidRangeProof => "secp: invalid range proof",
             Error::PartialSigFailure => "secp: partial sig (aggsig) failure",
             Error::SigSubtractionFailure => "secp: subtraction (aggsig) did not result in any valid signatures",
+            Error::SysRngFailure => "secp: system generator failure",
+            Error::GenericError => "secp: generic error",
+            Error::RangeProofGeneration => "secp: unable to generate a range proof",
+            Error::NonceExportError => "secp: nonce export failure",
+            Error::InvalidParameters => "secp: invalid parameters",
+            Error::SerializationError => "secp: serialization error",
+            Error::AllocationError => "secp: instance allocation error",
+            Error::BrokenAggSigContext => "secp: AggSigContext is broken",
         }
     }
 }
 
 // Passthrough Debug to Display, since errors should be user-visible
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl std::error::Error for Error {
-    fn description(&self) -> &str { self.as_str() }
-}
-
-
 /// The secp256k1 engine, used to execute all signature operations
 pub struct Secp256k1 {
     ctx: *mut ffi::Context,
-    caps: ContextFlag
+    caps: ContextFlag,
+    bulletproof_gen: Option<NonNull<ffi::BulletproofGenerators>>,
 }
 
-unsafe impl Send for Secp256k1 {}
-unsafe impl Sync for Secp256k1 {}
+// Note!!! Secp256k1 context is not safe to share between threads!
+// secp library thread safety tight to Secp256k1 context thread safety.
+//unsafe impl Send for Secp256k1 {}
+//unsafe impl Sync for Secp256k1 {}
+// Note: Clone for Secp256k1 is not enabled because we don't want share the conexts, as well as pass them between threads
 
 /// Flags used to determine the capabilities of a `Secp256k1` object;
 /// the more capabilities, the more expensive it is to create.
@@ -541,20 +782,6 @@ impl fmt::Display for ContextFlag {
     }
 }
 
-impl Clone for Secp256k1 {
-    fn clone(&self) -> Secp256k1 {
-        Secp256k1 {
-            ctx: unsafe { ffi::secp256k1_context_clone(self.ctx) },
-            caps: self.caps
-        }
-    }
-}
-
-impl PartialEq for Secp256k1 {
-    fn eq(&self, other: &Secp256k1) -> bool { self.caps == other.caps }
-}
-impl Eq for Secp256k1 { }
-
 impl fmt::Debug for Secp256k1 {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "Secp256k1 {{ [private], caps: {:?} }}", self.caps)
@@ -563,6 +790,12 @@ impl fmt::Debug for Secp256k1 {
 
 impl Drop for Secp256k1 {
     fn drop(&mut self) {
+        if let Some(gen) = self.bulletproof_gen {
+            unsafe {
+                ffi::secp256k1_bulletproof_generators_destroy(self.ctx,
+                              gen.as_ptr());
+            }
+        }
         unsafe { ffi::secp256k1_context_destroy(self.ctx); }
     }
 }
@@ -570,12 +803,14 @@ impl Drop for Secp256k1 {
 impl Secp256k1 {
     /// Creates a new Secp256k1 context
     #[inline]
-    pub fn new() -> Secp256k1 {
+    pub fn new() -> Result<Secp256k1, Error> {
         Secp256k1::with_caps(ContextFlag::Full)
     }
 
     /// Creates a new Secp256k1 context with the specified capabilities
-    pub fn with_caps(caps: ContextFlag) -> Secp256k1 {
+    /// Note: randomize is not called because we don't need it for every case. Caller suppose to
+    ///   call randomize() for attack critical workflows
+    pub fn with_caps(caps: ContextFlag) -> Result<Secp256k1, Error> {
         let flag = match caps {
             ContextFlag::None => ffi::SECP256K1_START_NONE,
             ContextFlag::SignOnly => ffi::SECP256K1_START_SIGN,
@@ -584,40 +819,57 @@ impl Secp256k1 {
                 ffi::SECP256K1_START_SIGN | ffi::SECP256K1_START_VERIFY
             }
         };
-        Secp256k1 { ctx: unsafe { ffi::secp256k1_context_create(flag) }, caps: caps }
+
+        let ctx = unsafe { ffi::secp256k1_context_create(flag) };
+        if ctx.is_null() {
+            return Err(Error::GenericError);
+        }
+
+        let mut res = Secp256k1 {
+            ctx,
+            caps,
+            bulletproof_gen: None,
+        };
+
+        match caps {
+            ContextFlag::SignOnly | ContextFlag::Full | ContextFlag::Commit => res.randomize_priv(&mut SysRng)?,
+            _ => {},
+        }
+
+        Ok(res)
     }
 
     /// Creates a new Secp256k1 context with no capabilities (just de/serialization)
-    pub fn without_caps() -> Secp256k1 {
+    pub fn without_caps() -> Result<Secp256k1, Error> {
         Secp256k1::with_caps(ContextFlag::None)
     }
 
     /// (Re)randomizes the Secp256k1 context for cheap sidechannel resistence;
     /// see comment in libsecp256k1 commit d2275795f by Gregory Maxwell
-    pub fn randomize<R: Rng>(&mut self, rng: &mut R) {
+    fn randomize_priv<R: TryCryptoRng>(&mut self, rng: &mut R) -> Result<(), Error> {
         let mut seed = [0u8; 32];
-        rng.fill(&mut seed);
-        unsafe {
-            let err = ffi::secp256k1_context_randomize(self.ctx, seed.as_ptr());
-            // This function cannot fail; it has an error return for future-proofing.
-            // We do not expose this error since it is impossible to hit, and we have
-            // precedent for not exposing impossible errors (for example in
-            // `PublicKey::from_secret_key` where it is impossble to create an invalid
-            // secret key through the API.)
-            // However, if this DOES fail, the result is potentially weaker side-channel
-            // resistance, which is deadly and undetectable, so we take out the entire
-            // thread to be on the safe side.
-            assert!(err == 1);
+        rng.try_fill_bytes(&mut seed)
+            .map_err(|_| Error::SysRngFailure)?;
+
+        let res = unsafe {
+            ffi::secp256k1_context_randomize(self.ctx, seed.as_ptr())
+        };
+        seed.zeroize();
+
+        if res != 1 {
+            return Err(Error::GenericError);
         }
+
+        Ok(())
     }
 
     /// Generates a random keypair. Convenience function for `key::SecretKey::new`
     /// and `key::PublicKey::from_secret_key`; call those functions directly for
     /// batch key generation. Requires a signing-capable context.
     #[inline]
-    pub fn generate_keypair<R: Rng>(&self, rng: &mut R)
+    pub fn generate_keypair<R: TryCryptoRng>(&self, rng: &mut R)
                                    -> Result<(key::SecretKey, key::PublicKey), Error> {
-        let sk = key::SecretKey::new(self, rng);
+        let sk = key::SecretKey::new(self, rng)?;
         let pk = key::PublicKey::from_secret_key(self, &sk)?;
         Ok((sk, pk))
     }
@@ -625,20 +877,23 @@ impl Secp256k1 {
     /// Constructs a signature for `msg` using the secret key `sk` and RFC6979 nonce
     /// Requires a signing-capable context.
     pub fn sign(&self, msg: &Message, sk: &key::SecretKey)
-                -> Result<Signature, Error> {
+                -> Result<EcdsaSignature, Error> {
         if self.caps == ContextFlag::VerifyOnly || self.caps == ContextFlag::None {
             return Err(Error::IncapableContext);
         }
 
-        let mut ret = ffi::Signature::blank();
-        unsafe {
-            // We can assume the return value because it's not possible to construct
-            // an invalid signature from a valid `Message` and `SecretKey`
-            assert_eq!(ffi::secp256k1_ecdsa_sign(self.ctx, &mut ret, msg.as_ptr(),
+        let mut ret = EcdsaSignature::new();
+        let res = unsafe {
+            ffi::secp256k1_ecdsa_sign(self.ctx, ret.as_mut_ptr(), msg.as_ptr(),
                                                  sk.as_ptr(), ffi::secp256k1_nonce_function_rfc6979,
-                                                 ptr::null()), 1);
+                                                 ptr::null())
+        };
+        if res == 1 {
+            Ok(ret)
         }
-        Ok(Signature::from(ret))
+        else {
+            Err(Error::InvalidSecretKey)
+        }
     }
 
     /// Constructs a signature for `msg` using the secret key `sk` and RFC6979 nonce
@@ -649,15 +904,18 @@ impl Secp256k1 {
             return Err(Error::IncapableContext);
         }
 
-        let mut ret = ffi::RecoverableSignature::blank();
-        unsafe {
-            // We can assume the return value because it's not possible to construct
-            // an invalid signature from a valid `Message` and `SecretKey`
-            assert_eq!(ffi::secp256k1_ecdsa_sign_recoverable(self.ctx, &mut ret, msg.as_ptr(),
+        let mut ret = RecoverableSignature::new();
+        let ok = unsafe {
+            ffi::secp256k1_ecdsa_sign_recoverable(self.ctx, ret.as_mut_ptr(), msg.as_ptr(),
                                                              sk.as_ptr(), ffi::secp256k1_nonce_function_rfc6979,
-                                                             ptr::null()), 1);
+                                                             ptr::null())
+        };
+        if ok == 1 {
+            Ok(RecoverableSignature::from(ret))
         }
-        Ok(RecoverableSignature::from(ret))
+        else {
+            Err(Error::InvalidSecretKey)
+        }
     }
 
     /// Determines the public key for which `sig` is a valid signature for
@@ -676,7 +934,7 @@ impl Secp256k1 {
                 return Err(Error::InvalidSignature);
             }
         };
-        Ok(key::PublicKey::from(pk))
+        key::PublicKey::from_secp256k1_pubkey(self, pk)
     }
 
     /// Checks that `sig` is a valid ECDSA signature for `msg` using the public
@@ -685,28 +943,37 @@ impl Secp256k1 {
     /// which OpenSSL would verify but not libsecp256k1, or vice-versa. Requires a
     /// verify-capable context.
     #[inline]
-    pub fn verify(&self, msg: &Message, sig: &Signature, pk: &key::PublicKey) -> Result<(), Error> {
+    pub fn verify(&self, msg: &Message, sig: &EcdsaSignature, pk: &key::PublicKey) -> Result<(), Error> {
         if self.caps == ContextFlag::SignOnly || self.caps == ContextFlag::None {
             return Err(Error::IncapableContext);
         }
+        if !sig.is_valid(self) {
+            return Err(Error::InvalidSignature);
+        }
 
-        if !pk.is_valid() {
-            Err(Error::InvalidPublicKey)
-        } else if unsafe { ffi::secp256k1_ecdsa_verify(self.ctx, sig.as_ptr(), msg.as_ptr(),
-                                                       pk.as_ptr()) } == 0 {
-            Err(Error::IncorrectSignature)
-        } else {
+        if !pk.is_valid(&self) {
+            return Err(Error::InvalidPublicKey);
+        };
+
+        let ok = unsafe { ffi::secp256k1_ecdsa_verify(self.ctx, sig.as_ptr(), msg.as_ptr(),
+                                                       pk.as_ptr())
+        };
+
+        if ok == 1 {
             Ok(())
+        } else {
+            Err(Error::IncorrectSignature)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use rand::{Rng, thread_rng};
+    use rand::TryRng;
+    use rand::rngs::SysRng;
     use crate::key::{SecretKey, PublicKey};
     use super::constants;
-    use super::{Secp256k1, Signature, RecoverableSignature, Message, RecoveryId, ContextFlag};
+    use super::{Secp256k1, EcdsaSignature, RecoverableSignature, Message, RecoveryId, ContextFlag};
     use super::Error::{InvalidMessage, InvalidPublicKey, IncorrectSignature, InvalidSignature,
                        IncapableContext};
 
@@ -725,21 +992,21 @@ mod tests {
 
     #[test]
     fn capabilities() {
-        let none = Secp256k1::with_caps(ContextFlag::None);
-        let sign = Secp256k1::with_caps(ContextFlag::SignOnly);
-        let vrfy = Secp256k1::with_caps(ContextFlag::VerifyOnly);
-        let full = Secp256k1::with_caps(ContextFlag::Full);
+        let none = Secp256k1::with_caps(ContextFlag::None).unwrap();
+        let sign = Secp256k1::with_caps(ContextFlag::SignOnly).unwrap();
+        let vrfy = Secp256k1::with_caps(ContextFlag::VerifyOnly).unwrap();
+        let full = Secp256k1::with_caps(ContextFlag::Full).unwrap();
 
         let mut msg = [0u8; 32];
-        thread_rng().fill(&mut msg);
+        SysRng.try_fill_bytes(&mut msg).unwrap();
         let msg = Message::from_slice(&msg).unwrap();
 
         // Try key generation
-        assert_eq!(none.generate_keypair(&mut thread_rng()), Err(IncapableContext));
-        assert_eq!(vrfy.generate_keypair(&mut thread_rng()), Err(IncapableContext));
-        assert!(sign.generate_keypair(&mut thread_rng()).is_ok());
-        assert!(full.generate_keypair(&mut thread_rng()).is_ok());
-        let (sk, pk) = full.generate_keypair(&mut thread_rng()).unwrap();
+        assert_eq!(none.generate_keypair(&mut SysRng), Err(IncapableContext));
+        assert_eq!(vrfy.generate_keypair(&mut SysRng), Err(IncapableContext));
+        assert!(sign.generate_keypair(&mut SysRng).is_ok());
+        assert!(full.generate_keypair(&mut SysRng).is_ok());
+        let (sk, pk) = full.generate_keypair(&mut SysRng).unwrap();
 
         // Try signing
         assert_eq!(none.sign(&msg, &sk), Err(IncapableContext));
@@ -772,7 +1039,7 @@ mod tests {
         assert_eq!(full.recover(&msg, &sigr), Ok(pk));
 
         // Check that we can produce keys from slices with no precomputation
-        let (pk_slice, sk_slice) = (&pk.serialize_vec(&none, true), &sk[..]);
+        let (pk_slice, sk_slice) = (&pk.serialize_vec(&none, true).unwrap(), &sk[..]);
         let new_pk = PublicKey::from_slice(&none, pk_slice).unwrap();
         let new_sk = SecretKey::from_slice(&none, sk_slice).unwrap();
         assert_eq!(sk, new_sk);
@@ -787,20 +1054,30 @@ mod tests {
 
     #[test]
     fn invalid_pubkey() {
-        let s = Secp256k1::new();
+        let s = Secp256k1::new().unwrap();
         let sig = RecoverableSignature::from_compact(&s, &[1; 64], RecoveryId(0)).unwrap();
-        let pk = PublicKey::new();
+        let pk = PublicKey::blank();
         let mut msg = [0u8; 32];
-        thread_rng().fill(&mut msg);
+        SysRng.try_fill_bytes(&mut msg).unwrap();
         let msg = Message::from_slice(&msg).unwrap();
 
-        assert_eq!(s.verify(&msg, &sig.to_standard(&s), &pk), Err(InvalidPublicKey));
+        assert_eq!(s.verify(&msg, &sig.to_standard(&s).unwrap(), &pk), Err(InvalidPublicKey));
+    }
+
+    #[test]
+    fn invalid_ecdsa_signature_encoding() {
+        let secp = Secp256k1::new().unwrap();
+        let sig = EcdsaSignature::new();
+        let (_, pk) = secp.generate_keypair(&mut SysRng).unwrap();
+        let msg = Message::from_slice(&[1u8; 32]).unwrap();
+
+        assert!(!sig.is_valid(&secp));
+        assert_eq!(secp.verify(&msg, &sig, &pk), Err(InvalidSignature));
     }
 
     #[test]
     fn sign() {
-        let mut s = Secp256k1::new();
-        s.randomize(&mut thread_rng());
+        let s = Secp256k1::new().unwrap();
         let one = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
 
@@ -822,30 +1099,29 @@ mod tests {
 
     #[test]
     fn signature_serialize_roundtrip() {
-        let mut s = Secp256k1::new();
-        s.randomize(&mut thread_rng());
+        let s = Secp256k1::new().unwrap();
 
         let mut msg = [0; 32];
         for _ in 0..100 {
-            thread_rng().fill(&mut msg);
+            SysRng.try_fill_bytes(&mut msg).unwrap();
             let msg = Message::from_slice(&msg).unwrap();
 
-            let (sk, _) = s.generate_keypair(&mut thread_rng()).unwrap();
+            let (sk, _) = s.generate_keypair(&mut SysRng).unwrap();
             let sig1 = s.sign(&msg, &sk).unwrap();
-            let der = sig1.serialize_der(&s);
-            let sig2 = Signature::from_der(&s, &der[..]).unwrap();
+            let der = sig1.serialize_der(&s).unwrap();
+            let sig2 = EcdsaSignature::from_der(&s, &der[..]).unwrap();
             assert_eq!(sig1, sig2);
 
-            let compact = sig1.serialize_compact(&s);
-            let sig2 = Signature::from_compact(&s, &compact[..]).unwrap();
+            let compact = sig1.serialize_compact(&s).unwrap();
+            let sig2 = EcdsaSignature::from_compact(&s, &compact[..]).unwrap();
             assert_eq!(sig1, sig2);
 
             round_trip_serde!(sig1);
 
-            assert!(Signature::from_compact(&s, &der[..]).is_err());
-            assert!(Signature::from_compact(&s, &compact[0..4]).is_err());
-            assert!(Signature::from_der(&s, &compact[..]).is_err());
-            assert!(Signature::from_der(&s, &der[0..4]).is_err());
+            assert!(EcdsaSignature::from_compact(&s, &der[..]).is_err());
+            assert!(EcdsaSignature::from_compact(&s, &compact[0..4]).is_err());
+            assert!(EcdsaSignature::from_der(&s, &compact[..]).is_err());
+            assert!(EcdsaSignature::from_der(&s, &der[0..4]).is_err());
          }
     }
 
@@ -853,9 +1129,9 @@ mod tests {
     fn signature_lax_der() {
         macro_rules! check_lax_sig(
             ($hex:expr) => ({
-                let secp = Secp256k1::without_caps();
+                let secp = Secp256k1::without_caps().unwrap();
                 let sig = hex!($hex);
-                assert!(Signature::from_der_lax(&secp, &sig[..]).is_ok());
+                assert!(EcdsaSignature::from_der_lax(&secp, &sig[..]).is_ok());
             })
         );
 
@@ -870,15 +1146,14 @@ mod tests {
 
     #[test]
     fn sign_and_verify() {
-        let mut s = Secp256k1::new();
-        s.randomize(&mut thread_rng());
+        let s = Secp256k1::new().unwrap();
 
         let mut msg = [0; 32];
         for _ in 0..100 {
-            thread_rng().fill(&mut msg);
+            SysRng.try_fill_bytes(&mut msg).unwrap();
             let msg = Message::from_slice(&msg).unwrap();
 
-            let (sk, pk) = s.generate_keypair(&mut thread_rng()).unwrap();
+            let (sk, pk) = s.generate_keypair(&mut SysRng).unwrap();
             let sig = s.sign(&msg, &sk).unwrap();
             assert_eq!(s.verify(&msg, &sig, &pk), Ok(()));
          }
@@ -886,8 +1161,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_extreme() {
-        let mut s = Secp256k1::new();
-        s.randomize(&mut thread_rng());
+        let s = Secp256k1::new().unwrap();
 
         // Wild keys: 1, CURVE_ORDER - 1
         // Wild msgs: 0, 1, CURVE_ORDER - 1, CURVE_ORDER
@@ -916,20 +1190,19 @@ mod tests {
 
     #[test]
     fn sign_and_verify_fail() {
-        let mut s = Secp256k1::new();
-        s.randomize(&mut thread_rng());
+        let s = Secp256k1::new().unwrap();
 
         let mut msg = [0u8; 32];
-        thread_rng().fill(&mut msg);
+        SysRng.try_fill_bytes(&mut msg).unwrap();
         let msg = Message::from_slice(&msg).unwrap();
 
-        let (sk, pk) = s.generate_keypair(&mut thread_rng()).unwrap();
+        let (sk, pk) = s.generate_keypair(&mut SysRng).unwrap();
 
         let sigr = s.sign_recoverable(&msg, &sk).unwrap();
-        let sig = sigr.to_standard(&s);
+        let sig = sigr.to_standard(&s).unwrap();
 
         let mut msg = [0u8; 32];
-        thread_rng().fill(&mut msg);
+        SysRng.try_fill_bytes(&mut msg).unwrap();
         let msg = Message::from_slice(&msg).unwrap();
         assert_eq!(s.verify(&msg, &sig, &pk), Err(IncorrectSignature));
 
@@ -939,14 +1212,13 @@ mod tests {
 
     #[test]
     fn sign_with_recovery() {
-        let mut s = Secp256k1::new();
-        s.randomize(&mut thread_rng());
+        let s = Secp256k1::new().unwrap();
 
         let mut msg = [0u8; 32];
-        thread_rng().fill(&mut msg);
+        SysRng.try_fill_bytes(&mut msg).unwrap();
         let msg = Message::from_slice(&msg).unwrap();
 
-        let (sk, pk) = s.generate_keypair(&mut thread_rng()).unwrap();
+        let (sk, pk) = s.generate_keypair(&mut SysRng).unwrap();
 
         let sig = s.sign_recoverable(&msg, &sk).unwrap();
 
@@ -955,8 +1227,7 @@ mod tests {
 
     #[test]
     fn bad_recovery() {
-        let mut s = Secp256k1::new();
-        s.randomize(&mut thread_rng());
+        let s = Secp256k1::new().unwrap();
 
         let msg = Message::from_slice(&[0x55; 32]).unwrap();
 
@@ -970,10 +1241,10 @@ mod tests {
 
     #[test]
     fn test_bad_slice() {
-        let s = Secp256k1::new();
-        assert_eq!(Signature::from_der(&s, &[0; constants::MAX_SIGNATURE_SIZE + 1]),
+        let s = Secp256k1::new().unwrap();
+        assert_eq!(EcdsaSignature::from_der(&s, &[0; constants::MAX_SIGNATURE_SIZE + 1]),
                    Err(InvalidSignature));
-        assert_eq!(Signature::from_der(&s, &[0; constants::MAX_SIGNATURE_SIZE]),
+        assert_eq!(EcdsaSignature::from_der(&s, &[0; constants::MAX_SIGNATURE_SIZE]),
                    Err(InvalidSignature));
 
         assert_eq!(Message::from_slice(&[0; constants::MESSAGE_SIZE - 1]),
@@ -984,8 +1255,16 @@ mod tests {
     }
 
     #[test]
+    fn test_from_der_rejects_invalid_scalars() {
+        let s = Secp256k1::new().unwrap();
+        let der_with_zero_r = [0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x01];
+
+        assert_eq!(EcdsaSignature::from_der(&s, &der_with_zero_r), Err(InvalidSignature));
+    }
+
+    #[test]
     fn test_debug_output() {
-        let s = Secp256k1::new();
+        let s = Secp256k1::new().unwrap();
         let sig = RecoverableSignature::from_compact(&s, &[
             0x66, 0x73, 0xff, 0xad, 0x21, 0x47, 0x74, 0x1f,
             0x04, 0x77, 0x2b, 0x6f, 0x92, 0x1f, 0x0b, 0xa6,
@@ -1007,7 +1286,7 @@ mod tests {
 
     #[test]
     fn test_recov_sig_serialize_compact() {
-        let s = Secp256k1::new();
+        let s = Secp256k1::new().unwrap();
 
         let recid_in = RecoveryId(1);
         let bytes_in = &[
@@ -1021,7 +1300,7 @@ mod tests {
             0x8d, 0x12, 0xee, 0xd0, 0x09, 0xb6, 0x8c, 0x89];
         let sig = RecoverableSignature::from_compact(
             &s, bytes_in, recid_in).unwrap();
-        let (recid_out, bytes_out) = sig.serialize_compact(&s);
+        let (recid_out, bytes_out) = sig.serialize_compact(&s).unwrap();
         assert_eq!(recid_in, recid_out);
         assert_eq!(&bytes_in[..], &bytes_out[..]);
     }
@@ -1049,22 +1328,23 @@ mod tests {
         let pk = hex!("031ee99d2b786ab3b0991325f2de8489246a6a3fdb700f6d0511b1d80cf5f4cd43");
         let msg = hex!("a4965ca63b7d8562736ceec36dfa5a11bf426eb65be8ea3f7a49ae363032da0d");
 
-        let secp = Secp256k1::new();
-        let mut sig = Signature::from_der(&secp, &sig[..]).unwrap();
+        let secp = Secp256k1::new().unwrap();
+        let mut sig = EcdsaSignature::from_der(&secp, &sig[..]).unwrap();
         let pk = PublicKey::from_slice(&secp, &pk[..]).unwrap();
         let msg = Message::from_slice(&msg[..]).unwrap();
 
         // without normalization we expect this will fail
         assert_eq!(secp.verify(&msg, &sig, &pk), Err(IncorrectSignature));
         // after normalization it should pass
-        sig.normalize_s(&secp);
+        sig.normalize_s(&secp).unwrap();
         assert_eq!(secp.verify(&msg, &sig, &pk), Ok(()));
     }
 }
 
 #[cfg(all(test, feature = "unstable"))]
 mod benches {
-    use rand::{Rng, thread_rng};
+    use rand::{Rng,TryCryptoRng};
+    use rand::rngs::SysRng;
     use test::{Bencher, black_box};
 
     use super::{Secp256k1, Message};
@@ -1076,7 +1356,7 @@ mod benches {
             fn next_u32(&mut self) -> u32 { self.0 += 1; self.0 }
         }
 
-        let s = Secp256k1::new();
+        let s = Secp256k1::new().unwrap();
         let mut r = CounterRng(0);
         bh.iter( || {
             let (sk, pk) = s.generate_keypair(&mut r).unwrap();
@@ -1087,11 +1367,11 @@ mod benches {
 
     #[bench]
     pub fn bench_sign(bh: &mut Bencher) {
-        let s = Secp256k1::new();
+        let s = Secp256k1::new().unwrap();
         let mut msg = [0u8; 32];
-        thread_rng().fill(&mut msg);
+        SysRng.try_fill_bytes(&mut msg).unwrap();
         let msg = Message::from_slice(&msg).unwrap();
-        let (sk, _) = s.generate_keypair(&mut thread_rng()).unwrap();
+        let (sk, _) = s.generate_keypair(&mut SysRng).unwrap();
 
         bh.iter(|| {
             let sig = s.sign(&msg, &sk).unwrap();
@@ -1101,11 +1381,11 @@ mod benches {
 
     #[bench]
     pub fn bench_verify(bh: &mut Bencher) {
-        let s = Secp256k1::new();
+        let s = Secp256k1::new().unwrap();
         let mut msg = [0u8; 32];
-        thread_rng().fill(&mut msg);
+        SysRng.try_fill_bytes(&mut msg).unwrap();
         let msg = Message::from_slice(&msg).unwrap();
-        let (sk, pk) = s.generate_keypair(&mut thread_rng()).unwrap();
+        let (sk, pk) = s.generate_keypair(&mut SysRng).unwrap();
         let sig = s.sign(&msg, &sk).unwrap();
 
         bh.iter(|| {
@@ -1116,11 +1396,11 @@ mod benches {
 
     #[bench]
     pub fn bench_recover(bh: &mut Bencher) {
-        let s = Secp256k1::new();
+        let s = Secp256k1::new().unwrap();
         let mut msg = [0u8; 32];
-        thread_rng().fill(&mut msg);
+        SysRng.try_fill_bytes(&mut msg).unwrap();
         let msg = Message::from_slice(&msg).unwrap();
-        let (sk, _) = s.generate_keypair(&mut thread_rng()).unwrap();
+        let (sk, _) = s.generate_keypair(&mut SysRng).unwrap();
         let sig = s.sign_recoverable(&msg, &sk).unwrap();
 
         bh.iter(|| {

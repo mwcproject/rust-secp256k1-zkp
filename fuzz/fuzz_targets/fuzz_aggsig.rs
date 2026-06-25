@@ -13,7 +13,8 @@ use secp256k1zkp::{
 };
 
 use secp256k1zkp::aggsig::AggSigContext;
-use secp256k1zkp::rand::{Rng, thread_rng};
+use secp256k1zkp::rand::TryRng;
+use secp256k1zkp::rand::rngs::SysRng;
 
 fuzz_target!(|data: &[u8]| {
     let numkeys = 3;
@@ -21,8 +22,8 @@ fuzz_target!(|data: &[u8]| {
         return ();
     }
 
-    let mut rng = thread_rng();
-    let secp = Secp256k1::with_caps(ContextFlag::Full);
+    let mut rng = &mut SysRng;
+    let secp = Secp256k1::with_caps(ContextFlag::Full).unwrap();
     let mut pks: Vec<PublicKey> = Vec::with_capacity(numkeys);
     let mut keypairs: Vec<(SecretKey, PublicKey)> = Vec::with_capacity(numkeys);
 
@@ -32,22 +33,24 @@ fuzz_target!(|data: &[u8]| {
             pks.push(pk.clone());
             keypairs.push((sk, pk));
         } else {
+            // Invalid data if regenarated intentionally. As a result, tests will not be reproducable, it is accepted.
+            // The harness is not input-deterministic - it is expected
             let (sk, pk) = secp.generate_keypair(&mut rng).unwrap();
             pks.push(pk.clone());
             keypairs.push((sk, pk));
         }
     }
 
-    let aggsig = AggSigContext::new(&secp, &pks);
+    let mut aggsig = AggSigContext::new(&pks).unwrap();
 
     for i in 0..numkeys {
-        if aggsig.generate_nonce(i) != true {
+        if aggsig.generate_nonce(i).unwrap() != true {
             panic!("failed to generate aggsig nonce: {}", i);
         }
     }
 
     let mut msg_in = [0u8; 32];
-    rng.fill(&mut msg_in);
+    rng.try_fill_bytes(&mut msg_in).unwrap();
     let msg = Message::from_slice(&msg_in).unwrap();
  
     let mut partial_sigs: Vec<AggSigPartialSignature> = vec![];
@@ -60,7 +63,12 @@ fuzz_target!(|data: &[u8]| {
     }
 
     match aggsig.combine_signatures(&partial_sigs) {
-        Ok(full_sig) => { let _ = aggsig.verify(full_sig, msg.clone(), &pks); () },
+        Ok(full_sig) => {
+            if !aggsig.verify(full_sig, msg.clone()).unwrap() {
+                panic!("aggsig.verify return false")
+            }
+            ()
+        },
         Err(e) => panic!("error combining signatures: {:?}", e),
     }
 });

@@ -10,7 +10,7 @@ fuzz_target!(|data: &[u8]| {
         return ();
     }
 
-    let s = Secp256k1::new();
+    let s = Secp256k1::new().unwrap();
 
     let msg = Message::from_slice(&data[..32]).unwrap();
 

@@ -11,11 +11,11 @@ fuzz_target!(|data: &[u8]| {
         return ();
     }
 
-    let s = Secp256k1::new();
+    let s = Secp256k1::new().unwrap();
 
     if let Ok(sk) = SecretKey::from_slice(&s, &data[..32]) {
         match PublicKey::from_secret_key(&s, &sk) {
-            Ok(pk) => { let _ = SharedSecret::new(&s, &pk, &sk); () },
+            Ok(pk) => { SharedSecret::new(&s, &pk, &sk).unwrap(); () },
             Err(e) => panic!("cannot create public key from secret: {}", e),
         }
     }

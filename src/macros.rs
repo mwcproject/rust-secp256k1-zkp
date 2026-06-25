@@ -16,6 +16,21 @@
 // This is a macro that routinely comes in handy
 macro_rules! impl_array_newtype {
     ($thing:ident, $ty:ty, $len:expr) => {
+        impl_array_newtype!(@base $thing, $ty, $len);
+        impl_array_newtype!(@compare $thing, $ty, $len);
+        impl_array_newtype!(@serde $thing, $ty, $len);
+    };
+
+    ($thing:ident, $ty:ty, $len:expr, no_serde) => {
+        impl_array_newtype!(@base $thing, $ty, $len);
+        impl_array_newtype!(@compare $thing, $ty, $len);
+    };
+
+    ($thing:ident, $ty:ty, $len:expr, no_serde_no_comp) => {
+        impl_array_newtype!(@base $thing, $ty, $len);
+    };
+
+    (@base $thing:ident, $ty:ty, $len:expr) => {
         impl $thing {
             #[inline]
             /// Converts the object to a raw pointer for FFI interfacing
@@ -46,41 +61,10 @@ macro_rules! impl_array_newtype {
             }
         }
 
-        impl PartialEq for $thing {
-            #[inline]
-            fn eq(&self, other: &$thing) -> bool {
-                &self[..] == &other[..]
-            }
-        }
-
-        impl Eq for $thing {}
-
-        impl PartialOrd for $thing {
-            #[inline]
-            fn partial_cmp(&self, other: &$thing) -> Option<::core::cmp::Ordering> {
-                self[..].partial_cmp(&other[..])
-            }
-        }
-
-        impl Ord for $thing {
-            #[inline]
-            fn cmp(&self, other: &$thing) -> ::core::cmp::Ordering {
-                self[..].cmp(&other[..])
-            }
-        }
-
         impl Clone for $thing {
             #[inline]
             fn clone(&self) -> $thing {
-                unsafe {
-                    use std::ptr::copy_nonoverlapping;
-                    use std::mem;
-                    let mut ret = mem::MaybeUninit::<$thing>::uninit();
-                    copy_nonoverlapping(self.as_ptr(),
-                                       (*ret.as_mut_ptr()).as_mut_ptr(),
-                                       $len);
-                    ret.assume_init()
-                }
+                $thing(self.0.clone())
             }
         }
 
@@ -133,7 +117,9 @@ macro_rules! impl_array_newtype {
                 &dat[..]
             }
         }
+    };
 
+    (@compare $thing:ident, $ty:ty, $len:expr) => {
         impl ::std::hash::Hash for $thing {
           fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
             state.write(&self.0)
@@ -143,6 +129,31 @@ macro_rules! impl_array_newtype {
           }
         }
 
+        impl PartialEq for $thing {
+            #[inline]
+            fn eq(&self, other: &$thing) -> bool {
+                &self[..] == &other[..]
+            }
+        }
+
+        impl Eq for $thing {}
+
+        impl PartialOrd for $thing {
+            #[inline]
+            fn partial_cmp(&self, other: &$thing) -> Option<::core::cmp::Ordering> {
+                self[..].partial_cmp(&other[..])
+            }
+        }
+
+        impl Ord for $thing {
+            #[inline]
+            fn cmp(&self, other: &$thing) -> ::core::cmp::Ordering {
+                self[..].cmp(&other[..])
+            }
+        }
+    };
+
+    (@serde $thing:ident, $ty:ty, $len:expr) => {
         impl<'de> ::serde::Deserialize<'de> for $thing {
             fn deserialize<D>(d: D) -> Result<$thing, D::Error>
                 where D: ::serde::Deserializer<'de>
@@ -194,7 +205,7 @@ macro_rules! impl_array_newtype {
                 (&self.0[..]).serialize(s)
             }
         }
-    }
+    };
 }
 
 macro_rules! impl_pretty_debug {
@@ -225,7 +236,7 @@ macro_rules! impl_raw_debug {
 }
 
 macro_rules! map_vec {
-  ($thing:expr, $mapfn:expr ) => {
+  ($thing:ident, $mapfn:expr ) => {
     $thing.iter()
       .map($mapfn)
       .collect::<Vec<_>>()
@@ -244,6 +255,6 @@ macro_rules! round_trip_serde (
         }
         let mut deserializer = crate::json::de::Deserializer::from_slice(&encoded);
         let decoded = ::serde::Deserialize::deserialize(&mut deserializer);
-        assert_eq!(Some(start), decoded.ok());
+        assert!(Some(start) == decoded.ok());
     })
 );

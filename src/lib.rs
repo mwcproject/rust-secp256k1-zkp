@@ -52,6 +52,7 @@ pub mod ffi;
 pub mod key;
 pub mod pedersen;
 pub mod aggsig;
+pub mod s2c;
 
 pub use key::SecretKey;
 pub use key::PublicKey;
@@ -63,6 +64,7 @@ pub use libc;
 pub use serde;
 pub use serde_json;
 pub use zeroize;
+pub use sha2;
 
 /// A tag used for recovering the public key from a compact signature
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

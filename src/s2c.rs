@@ -64,6 +64,7 @@ const MAX_ATTEMPTS: u32 = 1024;
 ///
 /// This is the base nonce *point* `R0`, not its secret scalar. It is safe to
 /// serialize and distribute alongside the signature and committed data.
+/// Serde represents it as exactly 66 hexadecimal characters, lowercase on output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Opening([u8; constants::COMPRESSED_PUBLIC_KEY_SIZE]);
 
@@ -84,6 +85,40 @@ impl Opening {
     /// Return the canonical 33-byte public opening for storage or transport.
     pub fn serialize(&self) -> [u8; constants::COMPRESSED_PUBLIC_KEY_SIZE] {
         self.0
+    }
+}
+
+impl serde::Serialize for Opening {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use std::fmt::Write;
+
+        let mut encoded = String::with_capacity(constants::COMPRESSED_PUBLIC_KEY_SIZE * 2);
+        for byte in &self.0 {
+            write!(&mut encoded, "{:02x}", byte).map_err(serde::ser::Error::custom)?;
+        }
+        serializer.serialize_str(&encoded)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Opening {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        let encoded: String = serde::Deserialize::deserialize(deserializer)?;
+        if encoded.len() != constants::COMPRESSED_PUBLIC_KEY_SIZE * 2
+            || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(D::Error::custom(
+                "S2C opening must contain exactly 66 hexadecimal characters",
+            ));
+        }
+        let mut bytes = [0u8; constants::COMPRESSED_PUBLIC_KEY_SIZE];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
+                .map_err(D::Error::custom)?;
+        }
+        let secp = Secp256k1::with_caps(crate::ContextFlag::None).map_err(D::Error::custom)?;
+        Self::from_slice(&secp, &bytes).map_err(D::Error::custom)
     }
 }
 
@@ -448,6 +483,57 @@ mod tests {
         let mut out_of_field = [0xff; 33];
         out_of_field[0] = 2;
         assert!(Opening::from_slice(&secp, &out_of_field).is_err());
+    }
+
+    #[test]
+    fn opening_json_uses_canonical_hex_and_roundtrips() {
+        let generator = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let secp = Secp256k1::new().unwrap();
+        let point = PublicKey::from_secret_key(&secp, &key(&secp, 1)).unwrap();
+        let opening =
+            Opening::from_slice(&secp, &point.serialize_vec(&secp, true).unwrap()).unwrap();
+        let json = format!("\"{}\"", generator);
+        assert_eq!(serde_json::to_string(&opening).unwrap(), json);
+        assert_eq!(serde_json::from_str::<Opening>(&json).unwrap(), opening);
+        assert_eq!(
+            serde_json::from_str::<Opening>(&json.to_uppercase()).unwrap(),
+            opening
+        );
+    }
+
+    #[test]
+    fn opening_json_rejects_invalid_encodings_and_points() {
+        let generator = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        for encoded in [
+            String::new(),
+            generator[..64].to_owned(),
+            generator[..65].to_owned(),
+            format!("{}00", generator),
+            format!("0x{}", generator),
+            format!(" {}", generator),
+            format!("{} ", generator),
+            format!("zz{}", &generator[2..]),
+            "é".repeat(33),
+            format!("04{}", &generator[2..]),
+            format!("00{}", &generator[2..]),
+            format!("02{}", "00".repeat(32)), // x=0 does not lift to a curve point.
+            format!("02{}", "ff".repeat(32)), // x is outside the curve's field.
+        ] {
+            assert!(
+                serde_json::from_value::<Opening>(serde_json::json!(encoded)).is_err(),
+                "accepted invalid opening: {}",
+                encoded
+            );
+        }
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!(vec![2u8; 33]),
+            serde_json::json!({ "opening": generator }),
+        ] {
+            assert!(serde_json::from_value::<Opening>(value).is_err());
+        }
     }
 
     #[test]

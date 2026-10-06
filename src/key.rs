@@ -28,8 +28,7 @@ use crate::constants;
 use crate::ffi;
 use libc::{c_char, c_void};
 use std::ptr;
-use zeroize::Zeroize;
-use crate::constants::GENERATOR_PUB_J_RAW;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Secret 256-bit key used as `x` in an ECDSA signature
 //#[derive(Zeroize)]
@@ -70,25 +69,19 @@ pub const ONE_KEY: SecretKey = SecretKey([0, 0, 0, 0, 0, 0, 0, 0,
 pub struct PublicKey(pub(crate) ffi::PublicKey);
 
 
-fn random_32_bytes<R: TryCryptoRng>(rng: &mut R) -> Result<[u8; 32], Error> {
-    let mut ret = [0u8; 32];
-    rng.try_fill_bytes(&mut ret)
-        .map_err(|_| Error::SysRngFailure)?;
-    Ok(ret)
-}
-
 impl SecretKey {
     /// Creates a new random secret key
     #[inline]
     pub fn new<R: TryCryptoRng>(secp: &Secp256k1, rng: &mut R) -> Result<SecretKey, Error> {
-        let mut data = random_32_bytes(rng)?;
-        let secret = loop {
-            if let Ok(secret) = SecretKey::from_slice(secp, &data) {
-                break secret;
+        // Fill in place so every exit wipes the temporary key material.
+        let mut data = Zeroizing::new([0u8; constants::SECRET_KEY_SIZE]);
+        loop {
+            rng.try_fill_bytes(&mut data[..])
+                .map_err(|_| Error::SysRngFailure)?;
+            if let Ok(secret) = SecretKey::from_slice(secp, &data[..]) {
+                return Ok(secret);
             }
-            data = random_32_bytes(rng)?;
-        };
-        Ok(secret)
+        }
     }
 
     /// Converts a `SECRET_KEY_SIZE`-byte slice to a secret key
@@ -262,9 +255,23 @@ impl PublicKey {
         PublicKey(ffi::PublicKey::blank())
     }
 
-    /// Public Key for J Generator
+    /// Public key for generator J, parsed from its portable SEC1 encoding.
     pub fn pub_j_raw() -> PublicKey {
-        PublicKey(ffi::PublicKey(GENERATOR_PUB_J_RAW))
+        let mut pk = ffi::PublicKey::blank();
+        // SAFETY: The built-in context supports parsing without allocation or
+        // mutation. The input and output buffers have the required sizes and
+        // remain valid for the duration of the call.
+        let parsed = unsafe {
+            ffi::secp256k1_ec_pubkey_parse(
+                ffi::secp256k1_context_no_precomp,
+                &mut pk,
+                constants::GENERATOR_PUB_J.as_ptr(),
+                constants::GENERATOR_PUB_J.len() as libc::size_t,
+            )
+        };
+        // J is a fixed, valid encoding, so parsing failure is an invariant violation.
+        assert_eq!(parsed, 1, "the fixed J generator must be a valid public key");
+        PublicKey(pk)
     }
 
     /// Creates a new public key as the sum of the provided keys
@@ -648,6 +655,41 @@ mod test {
     }
 
     #[test]
+    fn skey_new_rng_failure() {
+        struct FailingRng {
+            fills: usize,
+            fail_on: usize,
+        }
+
+        impl TryRng for FailingRng {
+            type Error = std::io::Error;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> { unimplemented!() }
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> { unimplemented!() }
+
+            fn try_fill_bytes(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
+                self.fills += 1;
+                if self.fills == self.fail_on {
+                    // An RNG may write part of the buffer before reporting failure.
+                    data[..16].fill(0x42);
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "RNG failed"));
+                }
+                data.fill(0); // Invalid scalar forces another attempt.
+                Ok(())
+            }
+        }
+
+        impl TryCryptoRng for FailingRng {}
+
+        let secp = Secp256k1::without_caps().unwrap();
+        for fail_on in [1, 2] {
+            let mut rng = FailingRng { fills: 0, fail_on };
+            assert!(matches!(SecretKey::new(&secp, &mut rng), Err(crate::Error::SysRngFailure)));
+            assert_eq!(rng.fills, fail_on);
+        }
+    }
+
+    #[test]
     fn pubkey_from_slice() {
         let s = Secp256k1::new().unwrap();
         assert_eq!(PublicKey::from_slice(&s, &[]), Err(InvalidPublicKey));
@@ -663,6 +705,31 @@ mod test {
         let mut hybrid = uncompressed_bytes;
         hybrid[0] = 6;
         assert_eq!(PublicKey::from_slice(&s, &hybrid), Err(InvalidPublicKey));
+    }
+
+    #[test]
+    fn pub_j_raw_matches_nums_generator() {
+        use sha2::{Digest, Sha256};
+
+        let secp = Secp256k1::without_caps().unwrap();
+        let j = PublicKey::pub_j_raw();
+        assert!(j.is_valid(&secp));
+
+        // J's x-coordinate is SHA256(SHA256(uncompressed G)).
+        let mut g = [0u8; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE];
+        g[0] = 4;
+        g[1..].copy_from_slice(&constants::GENERATOR_G);
+        let expected_x = Sha256::digest(Sha256::digest(g));
+        let serialized = j.serialize_vec(&secp, false).unwrap();
+        assert_eq!(serialized[0], 4);
+        assert_eq!(&serialized[1..33], &expected_x[..]);
+        // Check the documented y-coordinate as well, including its sign.
+        assert_eq!(&serialized[33..], &[
+            0xa4, 0x3f, 0x09, 0xd3, 0x2c, 0xaa, 0x8f, 0x53,
+            0x42, 0x3f, 0x42, 0x74, 0x03, 0xa5, 0x6a, 0x31,
+            0x65, 0xa5, 0xa6, 0x9a, 0x74, 0xcf, 0x56, 0xfc,
+            0x59, 0x01, 0xa2, 0xdc, 0xa6, 0xc5, 0xc4, 0x3a,
+        ]);
     }
 
     #[test]

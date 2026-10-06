@@ -104,7 +104,7 @@ pub struct RangeProof {
 	/// The proof itself, at most 5134 bytes long
 	pub proof: [u8; constants::MAX_PROOF_SIZE],
 	/// The length of the proof
-	pub plen: usize,
+	plen: usize,
 }
 
 impl PartialEq for RangeProof {
@@ -166,15 +166,6 @@ impl<'de> de::Deserialize<'de> for RangeProof {
 	}
 }
 
-// Note: We understand that this exposing the proof opaque internals. But existing code is
-//     already depends on that and using it for hashing and storage.
-impl AsRef<[u8]> for RangeProof {
-	fn as_ref(&self) -> &[u8] {
-		&self.proof[..self.plen as usize]
-	}
-}
-
-
 // This is a macro that check zero or invalid public key
 // Note, if pub key is invalid, no error is generated, it is expected
 //    this pub key will be ignored or used as a buffer for result.
@@ -206,7 +197,22 @@ impl RangeProof {
 			plen: 0,
 		}
 	}
-	/// The range proof as a byte slice.
+	/// Creates a range proof from bytes, rejecting input larger than the proof buffer.
+	///
+	/// Returns `Error::InvalidRangeProof` for oversized input. This checks only the
+	/// length; it does not verify the proof's cryptographic validity.
+	pub fn from_bytes(bytes: &[u8]) -> Result<RangeProof, Error> {
+		if bytes.len() > constants::MAX_PROOF_SIZE {
+			return Err(Error::InvalidRangeProof);
+		}
+		let mut proof = RangeProof::zero();
+		proof.proof[..bytes.len()].copy_from_slice(bytes);
+		proof.plen = bytes.len();
+		Ok(proof)
+	}
+	/// The range proof as a byte slice for hashing or storage.
+	///
+	/// Returns `Error::InvalidRangeProof` if the declared length exceeds the proof buffer.
 	pub fn bytes(&self) -> Result<&[u8], Error> {
 		if self.plen > constants::MAX_PROOF_SIZE {
 			return Err(Error::InvalidRangeProof);
@@ -593,7 +599,7 @@ impl Secp256k1 {
 			return Err(Error::IncapableContext);
 		}
 		let mut ret: [u8; 32] = [0u8; 32];
-		// Note: GENERATOR_PUB_J_RAW is expected to stay on the Rust side of the code.
+		let switch_pubkey = PublicKey::pub_j_raw();
 		let ok = unsafe {
 			ffi::secp256k1_blind_switch(
 				self.ctx,
@@ -602,7 +608,7 @@ impl Secp256k1 {
 				value,
 				&ffi::Generator(constants::GENERATOR_H),
 				&ffi::Generator(constants::GENERATOR_G),
-				&ffi::PublicKey(constants::GENERATOR_PUB_J_RAW),
+				switch_pubkey.as_ptr(),
 			)
 		};
 		if ok == 1 {
@@ -630,6 +636,13 @@ impl Secp256k1 {
 	/// on the blinding factor and commitment.
 	/// Note: Error RangeProofGeneration generated in case of invalid values and also rare case when
 	/// 		retry might help if blind factor wil be regenerated.
+	///
+	/// The caller must never generate range proofs for the same commitment with
+	/// different messages. The nonce is derived from the blinding factor, so doing
+	/// so can reuse signing randomness and reveal the blinding factor to anyone
+	/// who obtains both proofs. If the message changes, the caller must create a
+	/// new commitment using a fresh blinding factor before generating the proof.
+	/// This requirement is the caller's responsibility and is not enforced here.
 	#[cfg(not(feature = "bullet-proof-sizing"))]
 	pub fn range_proof(
 		&self,
@@ -761,8 +774,6 @@ impl Secp256k1 {
 		}
 
 		let mut value: u64 = 0;
-		// Note: recovered blind factor will be discarded intentionally
-		let mut blind: [u8; 32] = [0u8; 32];
 		// Note: message is intentionally limited by 2048 even rangeproof support the bigger buffer.
 		//    Larger message will be truncated to fit this buffer
 		let mut message: [u8; constants::PROOF_MSG_SIZE] = [0u8; constants::PROOF_MSG_SIZE];
@@ -777,7 +788,8 @@ impl Secp256k1 {
 		let success = unsafe {
 			ffi::secp256k1_rangeproof_rewind(
 				self.ctx,
-				blind.as_mut_ptr(),
+				// Passing NULL skips copying the unused recovered blinding factor.
+				ptr::null_mut(),
 				&mut value,
 				message.as_mut_ptr(),
 				&mut mlen,
@@ -1399,6 +1411,43 @@ mod tests {
 	use rand::rngs::SysRng;
 
 	use crate::pedersen::tests::chrono::prelude::*;
+
+	#[test]
+	fn range_proof_bytes_returns_declared_prefix() {
+		let proof = RangeProof::from_bytes(&[]).unwrap();
+		assert!(proof.bytes().unwrap().is_empty());
+		assert_eq!(proof.len(), Ok(0));
+
+		let mut proof = RangeProof::from_bytes(&[1, 2, 3]).unwrap();
+		assert!(proof.proof[3..].iter().all(|&byte| byte == 0));
+		proof.proof[3] = 9;
+		assert_eq!(proof.bytes().unwrap(), &[1, 2, 3]);
+		assert_eq!(proof.len(), Ok(3));
+
+		let bytes = [9; constants::MAX_PROOF_SIZE];
+		let proof = RangeProof::from_bytes(&bytes).unwrap();
+		assert_eq!(proof.bytes().unwrap(), &bytes[..]);
+		assert_eq!(proof.len(), Ok(constants::MAX_PROOF_SIZE));
+	}
+
+	#[test]
+	fn range_proof_from_bytes_rejects_oversized_input() {
+		assert_eq!(
+			RangeProof::from_bytes(&[0; constants::MAX_PROOF_SIZE + 1]),
+			Err(Error::InvalidRangeProof)
+		);
+	}
+
+	#[test]
+	fn range_proof_bytes_rejects_oversized_lengths() {
+		for plen in [constants::MAX_PROOF_SIZE + 1, usize::MAX] {
+			let proof = RangeProof {
+				proof: [0; constants::MAX_PROOF_SIZE],
+				plen,
+			};
+			assert_eq!(proof.bytes(), Err(Error::InvalidRangeProof));
+		}
+	}
 
 	#[test]
 	fn commit_parse_ser() {

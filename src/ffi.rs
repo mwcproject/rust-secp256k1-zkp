@@ -191,6 +191,9 @@ extern "C" {
     pub static secp256k1_nonce_function_default: NonceFn;
 
     // Contexts
+    /// Built-in read-only context for parsing and serialization; must not be destroyed.
+    pub(crate) static secp256k1_context_no_precomp: *const Context;
+
     pub fn secp256k1_context_create(flags: c_uint) -> *mut Context;
 
     pub fn secp256k1_context_clone(cx: *const Context) -> *mut Context;

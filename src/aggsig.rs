@@ -19,7 +19,7 @@ use crate::key::{PublicKey, SecretKey};
 use std::ptr;
 use crate::Secp256k1;
 use crate::{AggSigPartialSignature, AggSigSignature, Error, Message};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 use rand::rngs::SysRng;
 use rand::TryRng;
 
@@ -40,7 +40,7 @@ pub fn export_secnonce_single(secp: &Secp256k1) -> Result<SecretKey, Error> {
 		return Err(Error::IncapableContext);
 	}
 
-	let mut return_key : [u8; constants::SECRET_KEY_SIZE] = [0u8; constants::SECRET_KEY_SIZE];
+	let mut return_key = Zeroizing::new([0u8; constants::SECRET_KEY_SIZE]);
 	let mut seed = [0u8; 32];
 	SysRng.try_fill_bytes(&mut seed)
 		.map_err(|_| Error::SysRngFailure)?;
@@ -57,8 +57,7 @@ pub fn export_secnonce_single(secp: &Secp256k1) -> Result<SecretKey, Error> {
 		return Err(Error::NonceExportError);
 	}
 
-	let return_key = SecretKey::from_slice(secp, &return_key)?;
-	Ok(return_key)
+	SecretKey::from_slice(secp, &return_key[..])
 }
 
 macro_rules! is_valid_pubkey {

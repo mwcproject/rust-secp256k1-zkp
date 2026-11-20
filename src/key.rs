@@ -442,7 +442,7 @@ impl PublicKey {
         }
 
         let mut illegal = false;
-        let mut ret : ArrayVec<u8, {constants::PUBLIC_KEY_SIZE}> = ArrayVec::new();
+        let mut ret = ArrayVec::from([0u8; constants::PUBLIC_KEY_SIZE]);
         let mut ret_len = constants::PUBLIC_KEY_SIZE as ::libc::size_t;
         let compressed = if compressed { ffi::SECP256K1_SER_COMPRESSED } else { ffi::SECP256K1_SER_UNCOMPRESSED };
 
@@ -465,9 +465,7 @@ impl PublicKey {
         };
 
         if ok && ret_len<=constants::PUBLIC_KEY_SIZE {
-            unsafe {
-                ret.set_len(ret_len);
-            }
+            ret.truncate(ret_len);
             Ok(ret)
         }
         else {
